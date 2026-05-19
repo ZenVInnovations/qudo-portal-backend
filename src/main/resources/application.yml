@@ -51,5 +51,5 @@ management:
 
 logging:
   level:
-    com.pqc.backend: INFO
-    org.springframework.security: INFO
+    "[com.pqc]": INFO
+    "[org.springframework.security]": INFO

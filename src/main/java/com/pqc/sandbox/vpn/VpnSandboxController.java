@@ -1,4 +1,4 @@
-package com.pqc.backend.sandbox.vpn;
+package com.pqc.sandbox.vpn;
 
 import com.pqc.common.QudoCryptoService.KemEncapsulation;
 import com.pqc.common.QudoCryptoService.KeyMaterial;

@@ -1,11 +1,11 @@
-package com.pqc.backend;
+package com.pqc;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 @SpringBootApplication
-public class BackendApplication {
+public class PortalApplication {
     public static void main(String[] args) {
-        SpringApplication.run(BackendApplication.class, args);
+        SpringApplication.run(PortalApplication.class, args);
     }
 }

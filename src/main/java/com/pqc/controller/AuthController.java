@@ -1,4 +1,4 @@
-package com.pqc.backend.controller;
+package com.pqc.controller;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;

@@ -74,18 +74,17 @@ docker run -p 8093:8093 \
 
 ```
 src/main/java/com/pqc/
-├── backend/
-│   ├── BackendApplication.java
-│   ├── config/SecurityConfig.java        # OAuth2 + CORS + route-level auth
-│   ├── controller/
-│   │   ├── AuthController.java           # /api/v1/me
-│   │   └── DemoRequestController.java    # /api/v1/public/demo/*
-│   └── sandbox/
-│       └── vpn/
-│           ├── VpnSandboxController.java # /api/v1/sandbox/vpn/* (gated)
-│           └── VpnCryptoService.java     # ML-KEM-1024 / ML-DSA-65 / AES-256-GCM
+├── PortalApplication.java             # @SpringBootApplication entry point
+├── config/SecurityConfig.java         # OAuth2 + CORS + route-level auth
+├── controller/
+│   ├── AuthController.java            # /api/v1/me
+│   └── DemoRequestController.java     # /api/v1/public/demo/*
+├── sandbox/
+│   └── vpn/
+│       ├── VpnSandboxController.java  # /api/v1/sandbox/vpn/* (gated)
+│       └── VpnCryptoService.java      # ML-KEM-1024 / ML-DSA-65 / AES-256-GCM
 └── common/
-    └── QudoCryptoService.java            # Spring bean wrapping the Qudo JNI provider
+    └── QudoCryptoService.java         # Spring bean wrapping the Qudo JNI provider
 ```
 
-Future sandbox additions (QRNG, QKD, QHSM, other simulators from the old monorepo) drop in as new packages under `com.pqc.backend.sandbox.*`.
+Future sandbox additions (QRNG, QKD, QHSM, other simulators from the old monorepo) drop in as new packages under `com.pqc.sandbox.*`.

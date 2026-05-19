@@ -1,4 +1,4 @@
-package com.pqc.backend.controller;
+package com.pqc.controller;
 
 import com.pqc.common.QudoCryptoService;
 import com.pqc.common.QudoCryptoService.KeyMaterial;
