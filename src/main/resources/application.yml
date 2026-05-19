@@ -5,18 +5,18 @@ spring:
   application:
     name: qudo-portal-backend
 
-  security:
-    oauth2:
-      client:
-        registration:
-          google:
-            client-id: ${GOOGLE_CLIENT_ID:}
-            client-secret: ${GOOGLE_CLIENT_SECRET:}
-            scope:
-              - openid
-              - email
-              - profile
-            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+  # Google OAuth2 deferred. When re-enabling, add the spring-boot-starter-security
+  # and spring-boot-starter-oauth2-client deps to pom.xml and restore the block:
+  #
+  #   security:
+  #     oauth2:
+  #       client:
+  #         registration:
+  #           google:
+  #             client-id: ${GOOGLE_CLIENT_ID:}
+  #             client-secret: ${GOOGLE_CLIENT_SECRET:}
+  #             scope: [openid, email, profile]
+  #             redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
 
   mail:
     host: ${SMTP_ADDRESS:smtp.gmail.com}
@@ -52,4 +52,3 @@ management:
 logging:
   level:
     "[com.pqc]": INFO
-    "[org.springframework.security]": INFO

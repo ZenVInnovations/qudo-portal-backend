@@ -1,30 +1,27 @@
 package com.pqc.controller;
 
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.security.oauth2.core.user.OAuth2User;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
 
+/**
+ * Auth stub. Returns "not authenticated" until Google OAuth2 is wired in.
+ * The frontend reads this to decide whether to show the sign-in CTA.
+ *
+ * When auth is added back:
+ * - Re-add spring-boot-starter-security + spring-boot-starter-oauth2-client to pom.xml
+ * - Restore SecurityConfig.java (kept in git history at commit b4828e6's parent)
+ * - Inject @AuthenticationPrincipal OAuth2User and return its claims
+ */
 @RestController
 @RequestMapping("/api/v1")
 public class AuthController {
 
     @GetMapping("/me")
-    public ResponseEntity<?> me(@AuthenticationPrincipal OAuth2User user) {
-        if (user == null) {
-            return ResponseEntity.status(401).body(Map.of("authenticated", false));
-        }
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("authenticated", true);
-        body.put("email", user.getAttribute("email"));
-        body.put("name", user.getAttribute("name"));
-        body.put("picture", user.getAttribute("picture"));
-        body.put("emailVerified", user.getAttribute("email_verified"));
-        return ResponseEntity.ok(body);
+    public ResponseEntity<?> me() {
+        return ResponseEntity.ok(Map.of("authenticated", false));
     }
 }
