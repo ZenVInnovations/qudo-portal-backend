@@ -70,6 +70,26 @@ app:
   frontend:
     # Origin of the React app — used for CORS allow-list and the OAuth2 success redirect.
     origin: ${FRONTEND_ORIGIN:http://localhost:5173}
+  ratelimit:
+    # Per-IP token-bucket rate limits for the abusable public endpoints.
+    # Replaces the original plan to gate the sandbox behind Google sign-in:
+    # the primitives surface stays free to evaluate, but no single client IP
+    # can pin the JNI provider or the scanner executor. See RateLimitFilter.
+    enabled: ${APP_RATELIMIT_ENABLED:true}
+    sandbox:
+      # ML-DSA-65 sign is single-digit-ms — 60/min/IP is plenty for live
+      # exploration and still caps a hostile loop.
+      rpm: ${APP_RATELIMIT_SANDBOX_RPM:60}
+      burst: ${APP_RATELIMIT_SANDBOX_BURST:20}
+    scanner:
+      # Scans run real openssl s_client probes; each one is 1-5 seconds.
+      # Keep this low so a burst can't tie up the bounded executor.
+      rpm: ${APP_RATELIMIT_SCANNER_RPM:10}
+      burst: ${APP_RATELIMIT_SCANNER_BURST:5}
+    demo:
+      # One-shot lead-capture form. Tight budget to deter spam.
+      rpm: ${APP_RATELIMIT_DEMO_RPM:5}
+      burst: ${APP_RATELIMIT_DEMO_BURST:3}
   scanner:
     # Master kill switch for the TLS posture scanner. Set to false in prod
     # to disable the endpoint entirely (returns 503 instead of probing).
