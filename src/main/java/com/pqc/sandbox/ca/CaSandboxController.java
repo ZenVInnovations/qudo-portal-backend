@@ -81,6 +81,16 @@ public class CaSandboxController {
         }
     }
 
+    @PostMapping("/inspect-pem")
+    public ResponseEntity<?> inspectPem(@RequestBody Map<String, String> request) {
+        try {
+            String pem = request.get("pem");
+            return ResponseEntity.ok(Map.of("status", "success", "inspection", caService.inspectPem(pem)));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("status", "error", "message", e.getMessage()));
+        }
+    }
+
     @GetMapping("/algorithms")
     public ResponseEntity<?> getAlgorithms() {
         return ResponseEntity.ok(Map.of(

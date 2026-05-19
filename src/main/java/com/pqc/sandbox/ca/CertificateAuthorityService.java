@@ -151,6 +151,75 @@ public class CertificateAuthorityService {
         return List.of("ML-DSA-44", "ML-DSA-65", "ML-DSA-87");
     }
 
+    /**
+     * Inspect a user-supplied PEM certificate and return parsed details plus a
+     * quantum-safety verdict. Lets engineers drop in a real cert from their
+     * infrastructure and immediately see whether its signature algorithm is
+     * post-quantum.
+     */
+    public Map<String, Object> inspectPem(String pem) {
+        if (pem == null || pem.isBlank()) {
+            throw new IllegalArgumentException("PEM input is required");
+        }
+        byte[] pemBytes = pem.getBytes();
+        Map<String, String> details = parseCertificate(pemBytes);
+        String sigAlg = details.getOrDefault("signatureAlgorithm", "unknown");
+        Map<String, Object> verdict = classifyAlgorithm(sigAlg);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("details", details);
+        result.put("verdict", verdict);
+        result.put("recommendation", recommendation(verdict));
+        return result;
+    }
+
+    private Map<String, Object> classifyAlgorithm(String sigAlg) {
+        String upper = sigAlg.toUpperCase();
+        Map<String, Object> v = new LinkedHashMap<>();
+        v.put("algorithm", sigAlg);
+        if (upper.contains("ML-DSA") || upper.contains("MLDSA") || upper.contains("DILITHIUM")) {
+            v.put("family", "ML-DSA (lattice)");
+            v.put("quantumSafe", true);
+            v.put("standard", "FIPS 204");
+        } else if (upper.contains("SLH-DSA") || upper.contains("SPHINCS")) {
+            v.put("family", "SLH-DSA (hash-based)");
+            v.put("quantumSafe", true);
+            v.put("standard", "FIPS 205");
+        } else if (upper.contains("RSA")) {
+            v.put("family", "RSA");
+            v.put("quantumSafe", false);
+            v.put("broken-by", "Shor's algorithm on a CRQC");
+        } else if (upper.contains("ECDSA") || upper.contains("EC")) {
+            v.put("family", "ECDSA / EC");
+            v.put("quantumSafe", false);
+            v.put("broken-by", "Shor's algorithm on a CRQC");
+        } else if (upper.contains("DSA")) {
+            v.put("family", "DSA");
+            v.put("quantumSafe", false);
+            v.put("broken-by", "Shor's algorithm on a CRQC");
+        } else if (upper.contains("ED25519") || upper.contains("ED448")) {
+            v.put("family", "EdDSA");
+            v.put("quantumSafe", false);
+            v.put("broken-by", "Shor's algorithm on a CRQC");
+        } else {
+            v.put("family", "unknown");
+            v.put("quantumSafe", false);
+            v.put("note", "Could not classify algorithm; please double-check on the OpenSSL CLI: openssl x509 -in cert.pem -text -noout");
+        }
+        return v;
+    }
+
+    private String recommendation(Map<String, Object> verdict) {
+        Boolean safe = (Boolean) verdict.get("quantumSafe");
+        String family = String.valueOf(verdict.get("family"));
+        if (Boolean.TRUE.equals(safe)) {
+            return "This certificate's signature is already quantum-safe (" + family + "). No migration needed for the signature algorithm; verify your full chain (root + intermediates) is PQC end-to-end.";
+        }
+        return "This certificate uses " + family + ", which is vulnerable to a future CRQC. " +
+                "Plan to reissue with ML-DSA-65 (general purpose) or ML-DSA-87 (high security / NSS). " +
+                "For long-lived roots (20+ year validity), consider SLH-DSA-SHA2-256s. Try the /create-root endpoint to see the PQC equivalent.";
+    }
+
     private Map<String, String> parseCertificate(byte[] certPem) {
         Map<String, String> details = new LinkedHashMap<>();
         try {
