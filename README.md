@@ -4,17 +4,47 @@ Spring Boot JSON API that backs the [Qudo Portal Frontend](../qudo-portal-fronte
 
 ## What it serves
 
-| Surface | Path | Auth |
+| Surface | Path | Auth (when enabled) |
 | --- | --- | --- |
 | Health | `/actuator/health` | public |
-| Current user (stub) | `/api/v1/me` | public; always returns `{authenticated: false}` for now |
+| Current user | `/api/v1/me` | public; returns the persisted user when signed in, `{authenticated: false}` otherwise |
 | Demo request | `POST /api/v1/public/demo/request` | public |
 | Demo signing pubkey | `GET /api/v1/public/demo/signing-pubkey` | public |
-| VPN sandbox | `/api/v1/sandbox/vpn/**` | public (will be gated once auth is wired) |
+| TLS scanner | `POST /api/v1/scan` | public |
+| Sandboxes | `/api/v1/sandbox/**` | **signed in** when `app.auth.enabled=true` |
+| Downloads (future) | `/api/v1/downloads/**` | **signed in** |
+| Google OAuth start | `/oauth2/authorization/google` | public |
+| Logout | `POST /api/v1/logout` | signed in |
 
-> **Auth deferred.** Google OAuth2 will be added later. Right now everything is publicly accessible. The `/api/v1/me` endpoint exists as a stub so the frontend's `AuthGuard` machinery stays in place — flip it back on by re-adding the security deps and config (see "Re-enabling Google OAuth2" below).
+The portal starts in **public mode** by default. Flip `APP_AUTH_ENABLED=true` (with Google credentials set) to turn on Google OAuth2 — sandbox + downloads routes become protected, and successful logins are written to Postgres.
 
-## One-time setup
+## Persistence
+
+The BE uses Postgres for durable state. Schema is managed by Flyway:
+
+- `V1__create_users_table.sql` — portal users (one row per Google account)
+
+JPA is configured with `ddl-auto: validate` — Flyway owns the schema, JPA only verifies that the entities match.
+
+### Local Postgres in 30 seconds
+
+```bash
+docker compose up -d        # brings up Postgres 16 on localhost:5432
+mvn spring-boot:run         # BE runs migrations on startup, then serves traffic
+docker compose down -v      # stop AND wipe data when you're done
+```
+
+The default credentials (`qudo` / `qudo_local_dev`, db `qudo_portal`) match `application.yml`'s defaults so no env vars are needed for local dev.
+
+For a different DB target, override:
+
+```bash
+export DB_URL=jdbc:postgresql://my-prod-host:5432/qudo_portal
+export DB_USERNAME=...
+export DB_PASSWORD=...
+```
+
+## Qudo JNI setup
 
 The backend depends on a locally-installed `com.qudo:qudo-jni-crypto:1.0.0` artifact that ships under `libs/`. Install it into your local Maven repo once:
 
@@ -25,33 +55,26 @@ mvn install:install-file \
   -DgroupId=com.qudo -DartifactId=qudo-jni-crypto -Dversion=1.0.0 -Dpackaging=jar
 ```
 
-The native library (`libqudo_jni_crypto.{dylib,so}`) must be on `java.library.path` at runtime. The Spring Boot Maven plugin is wired to pass `-Djava.library.path=${qudo.native.lib.path}` for you — the default points at `../qudo-jni-crypto/build` (a sibling checkout of the qudo-jni-crypto repo). Override if your build directory lives elsewhere:
+The native library (`libqudo_jni_crypto.{dylib,so}`) must be on `java.library.path` at runtime. The Spring Boot Maven plugin is wired to pass `-Djava.library.path=${qudo.native.lib.path}` for you — the default points at `../qudo-jni-crypto/build`. Override:
 
 ```bash
 mvn -Dqudo.native.lib.path=/absolute/path/to/qudo-jni-crypto/build spring-boot:run
 ```
 
-When running the packaged jar directly:
-
-```bash
-java -Djava.library.path=../qudo-jni-crypto/build -jar target/qudo-portal-backend-1.0.0.jar
-```
-
-The Docker image places the lib at `/app/lib` and the entrypoint already sets `-Djava.library.path=/app/lib`.
-
 ## Run locally
 
 ```bash
+docker compose up -d
 mvn spring-boot:run
 ```
 
-Then start the frontend in the sibling `qudo-portal-frontend` repo. The frontend's Vite dev server proxies `/api/**` to this backend on port 8093.
+Then start the frontend in the sibling `qudo-portal-frontend` repo (proxies `/api/**` to port 8093).
 
 ## Build for prod
 
 ```bash
 mvn package
-java -jar target/qudo-portal-backend-1.0.0.jar
+java -Djava.library.path=/path/to/qudo/lib -jar target/qudo-portal-backend-1.0.0.jar
 ```
 
 Or via Docker (requires the `qudo-pqc-runtime:latest` base image with the native lib baked in):
@@ -59,59 +82,68 @@ Or via Docker (requires the `qudo-pqc-runtime:latest` base image with the native
 ```bash
 docker build -t qudo-portal-backend:1.0.0 .
 docker run -p 8093:8093 \
+  -e DB_URL=jdbc:postgresql://db:5432/qudo_portal \
+  -e DB_USERNAME=... -e DB_PASSWORD=... \
   -e FRONTEND_ORIGIN=https://qudo.zenv.ai \
   qudo-portal-backend:1.0.0
 ```
 
-## Re-enabling Google OAuth2
+## Enabling Google OAuth2 sign-in
 
-When ready to add sign-in back:
+Auth is off by default (`app.auth.enabled=false`). To turn it on:
 
-1. **`pom.xml`** — add back the two Spring Security starters:
+1. **Create an OAuth 2.0 Client ID** in [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
+   - Application type: Web application
+   - Authorized redirect URIs: `http://localhost:8093/login/oauth2/code/google` (and the prod equivalent)
+   - Authorized JS origins: `http://localhost:5173` (and prod)
 
-   ```xml
-   <dependency>
-     <groupId>org.springframework.boot</groupId>
-     <artifactId>spring-boot-starter-security</artifactId>
-   </dependency>
-   <dependency>
-     <groupId>org.springframework.boot</groupId>
-     <artifactId>spring-boot-starter-oauth2-client</artifactId>
-   </dependency>
-   ```
-
-2. **`application.yml`** — uncomment the `spring.security.oauth2.client.registration.google` block.
-
-3. **`SecurityConfig.java`** — restore from git history (was at `src/main/java/com/pqc/config/SecurityConfig.java`; recover with `git show <pre-strip-commit>:src/main/java/com/pqc/config/SecurityConfig.java`).
-
-4. **`AuthController.java`** — re-inject `@AuthenticationPrincipal OAuth2User` and return its claims instead of the stub.
-
-5. **Google Cloud Console** — create an OAuth 2.0 Web Application Client ID and set the env vars:
+2. **Export the credentials + flip the switch**:
 
    ```bash
+   export APP_AUTH_ENABLED=true
    export GOOGLE_CLIENT_ID=...
    export GOOGLE_CLIENT_SECRET=...
    export FRONTEND_ORIGIN=http://localhost:5173
+   mvn spring-boot:run
    ```
 
-   Authorized redirect URI: `http://localhost:8093/login/oauth2/code/google` (and the prod equivalent).
+3. **Verify**:
+   - Hit `http://localhost:8093/api/v1/sandbox/vpn/health` — should return `401 Unauthorized`.
+   - Hit `http://localhost:8093/oauth2/authorization/google` — should redirect to Google.
+   - After consent, you'll land back on the SPA and a row will appear in the `users` table:
+     ```bash
+     docker compose exec db psql -U qudo -d qudo_portal -c "select id, email, login_count, last_login_at from users"
+     ```
 
-6. **Frontend** — restore the AuthGuard's check and the sign-in/sign-out buttons in `Navbar.tsx`.
+When `APP_AUTH_ENABLED` is unset/false the OAuth2 placeholder credentials (`client-id: disabled`) are loaded by Spring's auto-config but never exercised — the SecurityFilterChain returns a permit-all chain.
 
 ## Layout
 
 ```
 src/main/java/com/pqc/
-├── PortalApplication.java             # @SpringBootApplication entry point
+├── PortalApplication.java          # @SpringBootApplication entry point
+├── config/
+│   └── SecurityConfig.java         # conditional OAuth2 + CORS, switches on app.auth.enabled
 ├── controller/
-│   ├── AuthController.java            # /api/v1/me  (stub until OAuth2 is back)
-│   └── DemoRequestController.java     # /api/v1/public/demo/*
+│   ├── AuthController.java         # /api/v1/me (DB-backed when signed in)
+│   ├── DemoRequestController.java  # /api/v1/public/demo/*
+│   └── ScannerController.java      # /api/v1/scan TLS posture scanner
+├── user/
+│   ├── User.java                   # JPA entity
+│   ├── UserRepository.java         # JpaRepository
+│   └── UserService.java            # upsertFromOAuth + lookup
 ├── sandbox/
-│   └── vpn/
-│       ├── VpnSandboxController.java  # /api/v1/sandbox/vpn/*
-│       └── VpnCryptoService.java      # ML-KEM-1024 / ML-DSA-65 / AES-256-GCM
+│   ├── vpn/                        # ML-KEM-1024 + ML-DSA-65 VPN sandbox
+│   ├── exchange/, dapp/, nft/, iot/, blockchain/, wallet/, defi/
+│   ├── restapi/                    # PQC JWT
+│   ├── signing/, ca/, email/, kms/, grpc/
 └── common/
-    └── QudoCryptoService.java         # Spring bean wrapping the Qudo JNI provider
+    └── QudoCryptoService.java      # Spring bean wrapping the Qudo JNI provider
+
+src/main/resources/
+├── application.yml                 # config + Postgres + conditional OAuth2
+└── db/migration/
+    └── V1__create_users_table.sql  # Flyway baseline
 ```
 
-Future sandbox additions (QRNG, QKD, QHSM, other simulators from the old monorepo) drop in as new packages under `com.pqc.sandbox.*`.
+Future migrations land in `db/migration` as `V2__*.sql`, `V3__*.sql`, etc.

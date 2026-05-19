@@ -5,18 +5,49 @@ spring:
   application:
     name: qudo-portal-backend
 
-  # Google OAuth2 deferred. When re-enabling, add the spring-boot-starter-security
-  # and spring-boot-starter-oauth2-client deps to pom.xml and restore the block:
-  #
-  #   security:
-  #     oauth2:
-  #       client:
-  #         registration:
-  #           google:
-  #             client-id: ${GOOGLE_CLIENT_ID:}
-  #             client-secret: ${GOOGLE_CLIENT_SECRET:}
-  #             scope: [openid, email, profile]
-  #             redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+  # ───── Database (Postgres) ─────
+  # Connection details come from env vars; defaults point at a local
+  # docker-compose Postgres (see docker-compose.yml at the repo root).
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/qudo_portal}
+    username: ${DB_USERNAME:qudo}
+    password: ${DB_PASSWORD:qudo_local_dev}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    # Flyway owns the schema; JPA never tries to DDL.
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          "[time_zone]": UTC
+        "[format_sql]": false
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  # ───── Google OAuth2 (only used when app.auth.enabled=true) ─────
+  # GOOGLE_CLIENT_ID defaults to "disabled" — a non-empty placeholder that
+  # keeps Spring Boot's OAuth2 auto-config happy even when no real
+  # credentials are set. The SecurityConfig switches between public and
+  # authenticated modes based on app.auth.enabled, so this placeholder is
+  # only ever exercised when auth is actually on.
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${GOOGLE_CLIENT_ID:disabled}
+            client-secret: ${GOOGLE_CLIENT_SECRET:disabled}
+            scope:
+              - openid
+              - email
+              - profile
+            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
 
   mail:
     host: ${SMTP_ADDRESS:smtp.gmail.com}
@@ -31,6 +62,11 @@ spring:
             enable: true
 
 app:
+  # Master switch for authentication. When false (default), the portal stays
+  # public; when true, OAuth2 login is required for /api/v1/sandbox/** and
+  # /api/v1/downloads/**, and successful logins upsert into the users table.
+  auth:
+    enabled: ${APP_AUTH_ENABLED:false}
   frontend:
     # Origin of the React app — used for CORS allow-list and the OAuth2 success redirect.
     origin: ${FRONTEND_ORIGIN:http://localhost:5173}
