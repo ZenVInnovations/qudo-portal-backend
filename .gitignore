@@ -1,0 +1,14 @@
+target/
+*.class
+*.jar
+!libs/*.jar
+.mvn/
+mvnw
+mvnw.cmd
+.idea/
+*.iml
+.vscode/
+.DS_Store
+keys/
+.env
+.env.local

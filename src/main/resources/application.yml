@@ -1,0 +1,55 @@
+server:
+  port: 8093
+
+spring:
+  application:
+    name: qudo-portal-backend
+
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${GOOGLE_CLIENT_ID:}
+            client-secret: ${GOOGLE_CLIENT_SECRET:}
+            scope:
+              - openid
+              - email
+              - profile
+            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+
+  mail:
+    host: ${SMTP_ADDRESS:smtp.gmail.com}
+    port: ${SMTP_PORT:587}
+    username: ${SMTP_USER_NAME:}
+    password: ${SMTP_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+
+app:
+  frontend:
+    # Origin of the React app — used for CORS allow-list and the OAuth2 success redirect.
+    origin: ${FRONTEND_ORIGIN:http://localhost:5173}
+
+demo:
+  notification:
+    to: ${DEMO_NOTIFY_TO:venkatesh.pulimamidi@zenv.ai}
+    from: ${DEMO_NOTIFY_FROM:noreply@zenv.ai}
+    fromName: ${DEMO_NOTIFY_FROM_NAME:Qudo PQC (ZenV Quantum)}
+  keys:
+    dir: ${DEMO_KEYS_DIR:./keys}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  level:
+    com.pqc.backend: INFO
+    org.springframework.security: INFO

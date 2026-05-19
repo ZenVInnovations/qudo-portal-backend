@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.qudo</groupId>
+    <artifactId>qudo-jni-crypto</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>QUDO JNI Crypto</name>
+    <description>
+        Production-grade Java cryptographic library powered by OpenSSL 3.x
+        and the QUDO FIPS provider. Supports ML-DSA (FIPS 204), ML-KEM (FIPS 203),
+        X509 certificates, AES-256-GCM, and SHA-2/SHA-3 via direct JNI calls.
+    </description>
+    <url>https://github.com/qudo/qudo-jni-crypto</url>
+
+    <properties>
+        <java.version>17</java.version>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <native.build.dir>${project.basedir}/build</native.build.dir>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.2</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Compile Java + generate JNI headers -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.12.1</version>
+                <configuration>
+                    <source>${java.version}</source>
+                    <target>${java.version}</target>
+                    <compilerArgs>
+                        <arg>-h</arg>
+                        <arg>${project.basedir}/src/main/native/include</arg>
+                    </compilerArgs>
+                </configuration>
+            </plugin>
+
+            <!-- Copy native lib to JAR resources -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <version>3.3.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-native-lib</id>
+                        <phase>process-classes</phase>
+                        <goals><goal>copy-resources</goal></goals>
+                        <configuration>
+                            <outputDirectory>${project.build.outputDirectory}/native</outputDirectory>
+                            <resources>
+                                <resource>
+                                    <directory>${native.build.dir}</directory>
+                                    <includes>
+                                        <include>*.dylib</include>
+                                        <include>*.so</include>
+                                        <include>*.dll</include>
+                                    </includes>
+                                </resource>
+                            </resources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Tests -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
+                <configuration>
+                    <argLine>-Djava.library.path=${native.build.dir}</argLine>
+                </configuration>
+            </plugin>
+
+            <!-- Source JAR -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <version>3.3.0</version>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <goals><goal>jar</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Javadoc JAR -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <version>3.6.3</version>
+                <configuration>
+                    <doclint>none</doclint>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>attach-javadocs</id>
+                        <goals><goal>jar</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- Profile to build native library via CMake -->
+        <profile>
+            <id>native</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.1.0</version>
+                        <executions>
+                            <execution>
+                                <id>cmake-configure</id>
+                                <phase>generate-resources</phase>
+                                <goals><goal>exec</goal></goals>
+                                <configuration>
+                                    <executable>cmake</executable>
+                                    <workingDirectory>${native.build.dir}</workingDirectory>
+                                    <arguments>
+                                        <argument>-DCMAKE_BUILD_TYPE=Release</argument>
+                                        <argument>${project.basedir}/src/main/native</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>cmake-build</id>
+                                <phase>generate-resources</phase>
+                                <goals><goal>exec</goal></goals>
+                                <configuration>
+                                    <executable>cmake</executable>
+                                    <workingDirectory>${native.build.dir}</workingDirectory>
+                                    <arguments>
+                                        <argument>--build</argument>
+                                        <argument>.</argument>
+                                        <argument>--config</argument>
+                                        <argument>Release</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+</project>
