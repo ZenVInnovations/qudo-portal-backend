@@ -27,7 +27,19 @@ mvn install:install-file \
   -DgroupId=com.qudo -DartifactId=qudo-jni-crypto -Dversion=1.0.0 -Dpackaging=jar
 ```
 
-The native library (libqudo_jni_crypto.{so,dylib}) must be on `java.library.path` at runtime — the Docker image places it at `/app/lib`; for local dev, set `-Djava.library.path=...` to wherever you built the native side.
+The native library (`libqudo_jni_crypto.{dylib,so}`) must be on `java.library.path` at runtime. The Spring Boot Maven plugin is wired to pass `-Djava.library.path=${qudo.native.lib.path}` for you — the default points at `../qudo-jni-crypto/build` (a sibling checkout of the [qudo-jni-crypto](https://github.com/) repo). Override if your build directory lives elsewhere:
+
+```bash
+mvn -Dqudo.native.lib.path=/absolute/path/to/qudo-jni-crypto/build spring-boot:run
+```
+
+When running the packaged jar directly:
+
+```bash
+java -Djava.library.path=../qudo-jni-crypto/build -jar target/qudo-portal-backend-1.0.0.jar
+```
+
+The Docker image places the lib at `/app/lib` and the entrypoint already sets `-Djava.library.path=/app/lib`.
 
 ## Google OAuth2 setup
 

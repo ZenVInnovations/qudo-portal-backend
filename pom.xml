@@ -17,6 +17,10 @@
     <properties>
         <java.version>17</java.version>
         <qudo.jni.version>1.0.0</qudo.jni.version>
+        <!-- Directory containing libqudo_jni_crypto.{dylib,so}. Default assumes
+             qudo-jni-crypto is checked out as a sibling repo. Override with:
+             mvn -Dqudo.native.lib.path=/absolute/path spring-boot:run -->
+        <qudo.native.lib.path>../qudo-jni-crypto/build</qudo.native.lib.path>
     </properties>
 
     <dependencies>
@@ -64,6 +68,11 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <!-- Native Qudo JNI lib must be on java.library.path; the
+                         packaged JAR run separately needs the same flag. -->
+                    <jvmArguments>-Djava.library.path=${qudo.native.lib.path}</jvmArguments>
+                </configuration>
             </plugin>
         </plugins>
     </build>
