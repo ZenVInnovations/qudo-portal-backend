@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Logback config with two profiles:
+    - default: human-readable single-line output for local dev.
+    - "prod" (SPRING_PROFILES_ACTIVE=prod): one JSON event per line via
+      logstash-logback-encoder, suitable for shipping to Loki / Cloudwatch
+      / Datadog / Stackdriver / etc.
+-->
+<configuration>
+
+    <springProfile name="!prod">
+        <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <pattern>%d{HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n</pattern>
+            </encoder>
+        </appender>
+        <root level="INFO">
+            <appender-ref ref="STDOUT"/>
+        </root>
+        <logger name="com.pqc" level="INFO"/>
+    </springProfile>
+
+    <springProfile name="prod">
+        <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <!-- Include thread + logger name in every event for grep-ability. -->
+                <includeContext>true</includeContext>
+                <includeMdc>true</includeMdc>
+                <customFields>{"service":"qudo-portal-backend"}</customFields>
+            </encoder>
+        </appender>
+        <root level="INFO">
+            <appender-ref ref="JSON"/>
+        </root>
+        <logger name="com.pqc" level="INFO"/>
+    </springProfile>
+
+</configuration>

@@ -1,0 +1,30 @@
+# Test profile overrides. The Postgres URL/username/password are injected
+# dynamically by AbstractIntegrationTest's @DynamicPropertySource hook from
+# the Testcontainers Postgres instance — see the test base class.
+
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+
+  # Auth stays off in tests so the sandbox health endpoints stay public.
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: disabled
+            client-secret: disabled
+
+app:
+  auth:
+    enabled: false
+  scanner:
+    enabled: false   # tests don't probe external hosts
+
+logging:
+  level:
+    "[com.pqc]": INFO
+    "[org.hibernate]": WARN

@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      # The qudo-jni-crypto artifact ships under libs/ — install it into the
+      # CI runner's local Maven repo before the build needs it.
+      - name: Install Qudo JNI artifact
+        run: |
+          mvn install:install-file \
+            -Dfile=libs/qudo-jni-crypto-1.0.0.jar \
+            -DpomFile=libs/qudo-jni-crypto-1.0.0.pom \
+            -DgroupId=com.qudo \
+            -DartifactId=qudo-jni-crypto \
+            -Dversion=1.0.0 \
+            -Dpackaging=jar \
+            -q
+
+      - name: Build + run tests
+        # Tests use Testcontainers, which needs Docker on the runner — GitHub
+        # Actions ubuntu-latest provides it out of the box.
+        run: mvn -B verify
+
+      - name: Upload surefire reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: target/surefire-reports
+
+  publish-image:
+    needs: build-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest
+
+      - name: Build + push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Pull caching speeds up subsequent builds.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-staging:
+    needs: publish-image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Deploy to staging
+        run: |
+          # TODO: replace with the actual deploy step once staging infra is in place.
+          # Likely shapes:
+          #   - kubectl set image deployment/qudo-portal-backend backend=$IMAGE
+          #   - flyctl deploy --image $IMAGE
+          #   - aws ecs update-service ... --force-new-deployment
+          #   - cap-rover / dokku trigger
+          echo "[stub] Would deploy image ghcr.io/${{ github.repository }}:${{ github.sha }} to staging"
+          echo "Add real deploy logic + a STAGING_DEPLOY_TOKEN secret to make this step do work."

@@ -1,10 +1,14 @@
 package com.pqc.controller;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.net.InetAddress;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -31,16 +35,38 @@ import java.util.regex.Pattern;
 @RequestMapping("/api/v1/scan")
 public class ScannerController {
 
+    private static final Logger log = LoggerFactory.getLogger(ScannerController.class);
     private static final Pattern HOST_PATTERN = Pattern.compile("^[a-zA-Z0-9.\\-_]+:[0-9]{1,5}$");
     private static Boolean opensslAvailableCache = null;
 
+    @Value("${app.scanner.enabled:true}")
+    private boolean scannerEnabled;
+
+    @Value("${app.scanner.allow-private-addresses:true}")
+    private boolean allowPrivateAddresses;
+
+    @Value("${app.scanner.max-output-bytes:65536}")
+    private int maxOutputBytes;
+
     @PostMapping
     public ResponseEntity<?> scan(@RequestBody Map<String, String> request) {
+        if (!scannerEnabled) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "error", "Scanner is disabled in this environment",
+                    "hint", "Set APP_SCANNER_ENABLED=true to enable."));
+        }
         String host = normalizeHost(request.getOrDefault("host", "localhost:8443"));
         if (!isValidHost(host)) {
             return ResponseEntity.badRequest().body(Map.of(
                     "error", "Invalid host format",
                     "hint", "Use hostname or IP with optional port (e.g. example.com:443 or 10.0.0.1:8443)"));
+        }
+        String ssrfRejection = checkSsrf(host);
+        if (ssrfRejection != null) {
+            log.warn("Scanner request rejected (SSRF guard): {}", host);
+            return ResponseEntity.status(403).body(Map.of(
+                    "error", "Target rejected by SSRF guard",
+                    "hint", ssrfRejection));
         }
         if (!opensslAvailable()) {
             return ResponseEntity.status(503).body(Map.of(
@@ -76,6 +102,9 @@ public class ScannerController {
 
     @PostMapping("/bulk")
     public ResponseEntity<?> scanBulk(@RequestBody Map<String, Object> request) {
+        if (!scannerEnabled) {
+            return ResponseEntity.status(503).body(Map.of("error", "Scanner is disabled in this environment"));
+        }
         @SuppressWarnings("unchecked")
         List<String> hosts = (List<String>) request.getOrDefault("hosts", List.of());
         if (!opensslAvailable()) {
@@ -90,6 +119,12 @@ public class ScannerController {
             if (!isValidHost(host)) {
                 results.add(Map.of("endpoint", host, "score", 0, "scoreLabel", "Error",
                         "error", "Invalid host format."));
+                continue;
+            }
+            String ssrfRejection = checkSsrf(host);
+            if (ssrfRejection != null) {
+                results.add(Map.of("endpoint", host, "score", 0, "scoreLabel", "Rejected",
+                        "error", "SSRF guard: " + ssrfRejection));
                 continue;
             }
             try {
@@ -122,6 +157,34 @@ public class ScannerController {
 
     private boolean isValidHost(String host) {
         return host != null && HOST_PATTERN.matcher(host).matches();
+    }
+
+    /**
+     * SSRF defence. Resolves the hostname and rejects targets that point at
+     * loopback / link-local / RFC-1918 / multicast / cloud metadata addresses
+     * unless {@code app.scanner.allow-private-addresses} is true. Prevents
+     * the scanner from being used as a reflector against internal services
+     * (e.g. 169.254.169.254 metadata, 10.x kube-apiserver, 192.168.x routers).
+     *
+     * @return {@code null} when the target is acceptable, otherwise a
+     *         human-readable rejection reason for the API response.
+     */
+    private String checkSsrf(String host) {
+        if (allowPrivateAddresses) return null;
+        String hostname = host.contains(":") ? host.substring(0, host.lastIndexOf(':')) : host;
+        try {
+            InetAddress[] addresses = InetAddress.getAllByName(hostname);
+            for (InetAddress addr : addresses) {
+                if (addr.isAnyLocalAddress()) return "wildcard / 0.0.0.0";
+                if (addr.isLoopbackAddress()) return "loopback (127.0.0.0/8, ::1)";
+                if (addr.isLinkLocalAddress()) return "link-local (169.254.0.0/16, fe80::/10) — includes cloud metadata endpoints";
+                if (addr.isSiteLocalAddress()) return "RFC-1918 private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)";
+                if (addr.isMulticastAddress()) return "multicast";
+            }
+            return null;
+        } catch (Exception e) {
+            return "DNS resolution failed for " + hostname;
+        }
     }
 
     private boolean opensslAvailable() {
@@ -162,13 +225,26 @@ public class ScannerController {
             p.getOutputStream().write("Q\n".getBytes());
             p.getOutputStream().flush();
 
+            // Cap captured output to prevent OOM from a malicious target. Once
+            // we hit the cap we stop reading but keep the partial output for
+            // parsing — the relevant TLS handshake lines come early.
             StringBuilder output = new StringBuilder();
             try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
                 String line;
-                while ((line = r.readLine()) != null) output.append(line).append("\n");
+                while ((line = r.readLine()) != null) {
+                    output.append(line).append("\n");
+                    if (output.length() >= maxOutputBytes) {
+                        log.warn("Scanner output cap hit for {} (probe={}); truncating", host, mode);
+                        break;
+                    }
+                }
             }
-            boolean completed = p.waitFor(15, TimeUnit.SECONDS);
-            if (!completed) { p.destroyForcibly(); continue; }
+            boolean completed = p.waitFor(10, TimeUnit.SECONDS);
+            if (!completed) {
+                p.destroyForcibly();
+                p.waitFor(2, TimeUnit.SECONDS);  // give it a beat to die
+                continue;
+            }
 
             String raw = output.toString();
             lastOutput = raw;

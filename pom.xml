@@ -70,13 +70,12 @@
             <artifactId>postgresql</artifactId>
             <scope>runtime</scope>
         </dependency>
+        <!-- Spring Boot 3.2.x manages Flyway 9.x, which bundles all DB-specific
+             support into flyway-core. Bump the version + add
+             flyway-database-postgresql when we move to Spring Boot 3.3+. -->
         <dependency>
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-core</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
 
         <!-- Qudo JNI crypto provider (FIPS 203/204/205 algorithms via OpenSSL).
@@ -86,6 +85,44 @@
             <groupId>com.qudo</groupId>
             <artifactId>qudo-jni-crypto</artifactId>
             <version>${qudo.jni.version}</version>
+        </dependency>
+
+        <!-- Observability: Micrometer + Prometheus registry. Exposes
+             /actuator/prometheus for scraping. -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Structured JSON logging via logstash-logback-encoder (enabled by
+             the "prod" Spring profile in logback-spring.xml). Spring Boot
+             3.4+ has built-in JSON layouts but we're on 3.2.x. -->
+        <dependency>
+            <groupId>net.logstash.logback</groupId>
+            <artifactId>logstash-logback-encoder</artifactId>
+            <version>7.4</version>
+        </dependency>
+
+        <!-- ───── Test deps ───── -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Testcontainers spins up real Postgres for tests so we get
+             production parity (UUID, TIMESTAMPTZ) without Flyway H2 quirks. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>1.19.7</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>1.19.7</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 
@@ -98,6 +135,16 @@
                     <!-- Native Qudo JNI lib must be on java.library.path; the
                          packaged JAR run separately needs the same flag. -->
                     <jvmArguments>-Djava.library.path=${qudo.native.lib.path}</jvmArguments>
+                </configuration>
+            </plugin>
+            <!-- Surefire (unit tests) and Failsafe (integration tests) need
+                 the same -Djava.library.path so QudoCryptoService can load
+                 the native lib at @PostConstruct time. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <argLine>-Djava.library.path=${qudo.native.lib.path}</argLine>
                 </configuration>
             </plugin>
         </plugins>

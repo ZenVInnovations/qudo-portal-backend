@@ -70,6 +70,19 @@ app:
   frontend:
     # Origin of the React app — used for CORS allow-list and the OAuth2 success redirect.
     origin: ${FRONTEND_ORIGIN:http://localhost:5173}
+  scanner:
+    # Master kill switch for the TLS posture scanner. Set to false in prod
+    # to disable the endpoint entirely (returns 503 instead of probing).
+    enabled: ${APP_SCANNER_ENABLED:true}
+    # Allow scanning loopback / RFC-1918 / link-local addresses. Defaults
+    # to true for dev convenience (so localhost:8443 works); set to false
+    # in any deployment that's reachable from untrusted networks — prevents
+    # the scanner from being used as an SSRF reflector against the host's
+    # internal network or cloud metadata endpoints (169.254.169.254).
+    allow-private-addresses: ${APP_SCANNER_ALLOW_PRIVATE:true}
+    # Cap on captured openssl output bytes — defends against an oversized
+    # response from a malicious target trying to OOM the BE.
+    max-output-bytes: ${APP_SCANNER_MAX_OUTPUT_BYTES:65536}
 
 demo:
   notification:
@@ -83,7 +96,18 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # Add prometheus + loggers; keep info + health. Lock down further in
+        # prod via a management.security profile that requires basic auth on
+        # the management context.
+        include: health,info,prometheus,loggers,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-components: when-authorized
+  metrics:
+    tags:
+      application: qudo-portal-backend
 
 logging:
   level:
