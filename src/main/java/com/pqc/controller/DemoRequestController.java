@@ -178,10 +178,7 @@ public class DemoRequestController {
                     "Organization: " + request.get("organization") + "\n" +
                     "Request ID:   " + request.get("id") + "\n" +
                     "Submitted:    " + request.get("submittedAt") + "\n" +
-                    (message.isEmpty() ? "" : "\nMessage:\n" + message + "\n") +
-                    "\n--\n" +
-                    "Signed with " + SIG_ALG + " (FIPS 204) via Qudo JNI.\n" +
-                    "Delivered over TLS with X25519MLKEM768 hybrid PQC key exchange.\n";
+                    (message.isEmpty() ? "" : "\nMessage:\n" + message + "\n");
             m.setText(body);
 
             if (sigBase64 != null) {
