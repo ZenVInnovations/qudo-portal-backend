@@ -108,14 +108,18 @@ public class ScannerController {
         try {
             String rawOutput = observeTlsViaJsse(host);
             Map<String, String> tlsInfo = parseTlsInfo(rawOutput);
-            // PQC capability check is optional best-effort. Patches the
-            // keyExchange field when MLKEM is negotiated; otherwise leave
-            // tlsInfo to reflect the JSSE handshake (which by definition
-            // didn't speak PQC).
-            String pqcGroup = probePqcCapability(host);
-            if (pqcGroup != null) {
-                tlsInfo.put("keyExchange", pqcGroup);
-                rawOutput += "# probe: pqc-capability\nNegotiated TLS1.3 group: " + pqcGroup + "\n";
+            // For TLS 1.3 sessions, JSSE doesn't tell us the negotiated
+            // named group — recover it via a small openssl probe. The
+            // probe advertises X25519MLKEM768 first, so a PQC-capable
+            // server lights up; otherwise we still get the classical
+            // group the server picked. Skipped for TLS 1.2 (kex is in
+            // the ciphersuite name already) and when openssl is absent.
+            if ("TLSv1.3".equals(tlsInfo.get("tlsVersion"))) {
+                String group = probeTls13Group(host);
+                if (group != null) {
+                    tlsInfo.put("keyExchange", group);
+                    rawOutput += "# probe: tls1_3-group\nNegotiated TLS1.3 group: " + group + "\n";
+                }
             }
             List<Map<String, String>> inventory = buildInventory(tlsInfo);
             int score = calculateScore(inventory);
@@ -191,8 +195,10 @@ public class ScannerController {
             try {
                 String rawOutput = observeTlsViaJsse(host);
                 Map<String, String> tlsInfo = parseTlsInfo(rawOutput);
-                String pqcGroup = probePqcCapability(host);
-                if (pqcGroup != null) tlsInfo.put("keyExchange", pqcGroup);
+                if ("TLSv1.3".equals(tlsInfo.get("tlsVersion"))) {
+                    String group = probeTls13Group(host);
+                    if (group != null) tlsInfo.put("keyExchange", group);
+                }
                 List<Map<String, String>> inventory = buildInventory(tlsInfo);
                 int score = calculateScore(inventory);
                 String label = score >= 80 ? "Quantum-Ready" : score >= 50 ? "Partially Ready" : "At Risk";
@@ -342,20 +348,29 @@ public class ScannerController {
     }
 
     /**
-     * Phase 2: tiny openssl probe asking specifically whether the
-     * server will negotiate the {@code X25519MLKEM768} hybrid group.
-     * Best-effort — when openssl isn't installed or the probe times
-     * out, we just don't claim PQC capability.
+     * Phase 2: tiny openssl probe to recover the negotiated TLS 1.3
+     * named group, which JSSE doesn't expose via the standard
+     * {@link SSLSession} API in Java 17. Advertises the PQC hybrid
+     * group first, then classical fallbacks. If the server speaks PQC
+     * we'll see {@code X25519MLKEM768}; otherwise we'll see whichever
+     * classical group the server picked from the rest of the list.
      *
-     * @return the negotiated group name (e.g. {@code "X25519MLKEM768"})
-     *         if PQC was negotiated, {@code null} otherwise.
+     * Only meaningful for TLS 1.3 connections — for TLS 1.2 the kex is
+     * embedded in the ciphersuite name and {@link #deriveKeyExchange}
+     * already handles that. Best-effort; when openssl isn't installed
+     * or the probe times out we leave the kex as "TLS 1.3 group not
+     * reported".
+     *
+     * @return the negotiated group name (e.g. {@code "X25519MLKEM768"}
+     *         or {@code "X25519"}), or {@code null} when we couldn't
+     *         determine it.
      */
-    private String probePqcCapability(String host) {
+    private String probeTls13Group(String host) {
         if (!opensslAvailable()) return null;
         try {
             ProcessBuilder pb = new ProcessBuilder(
                     "openssl", "s_client", "-connect", host, "-brief",
-                    "-tls1_3", "-groups", "X25519MLKEM768");
+                    "-tls1_3", "-groups", "X25519MLKEM768:X25519:P-384:P-256");
             pb.redirectErrorStream(true);
             Process p = pb.start();
             try { p.getOutputStream().write("Q\n".getBytes()); p.getOutputStream().flush(); }
@@ -375,12 +390,9 @@ public class ScannerController {
             }
             String raw = output.toString();
             Matcher m = Pattern.compile("Negotiated TLS1\\.3 group:\\s*(\\S+)").matcher(raw);
-            if (m.find() && m.group(1).toUpperCase().contains("MLKEM")) {
-                return m.group(1).trim();
-            }
-            return null;
+            return m.find() ? m.group(1).trim() : null;
         } catch (Exception e) {
-            log.debug("PQC probe failed for {}: {}", host, e.toString());
+            log.debug("TLS 1.3 group probe failed for {}: {}", host, e.toString());
             return null;
         }
     }
