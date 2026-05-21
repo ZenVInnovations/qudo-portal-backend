@@ -9,18 +9,7 @@ spring:
   flyway:
     enabled: true
 
-  # Auth stays off in tests so the sandbox health endpoints stay public.
-  security:
-    oauth2:
-      client:
-        registration:
-          google:
-            client-id: disabled
-            client-secret: disabled
-
 app:
-  auth:
-    enabled: false
   scanner:
     enabled: false   # tests don't probe external hosts
 
