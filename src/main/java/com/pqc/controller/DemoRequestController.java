@@ -16,6 +16,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.security.MessageDigest;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
@@ -167,19 +170,42 @@ public class DemoRequestController {
             MimeMessageHelper m = new MimeMessageHelper(mime, false, "UTF-8");
             m.setTo(notifyTo);
             m.setFrom(notifyFrom, notifyFromName);
-            if (!request.get("email").isEmpty()) m.setReplyTo(request.get("email"));
-            m.setSubject("Qudo PQC — Demo Request from " + request.get("name")
-                    + " (" + request.get("organization") + ")");
-
+            String fromName = request.get("name");
+            String fromEmail = request.get("email");
+            String org = request.get("organization");
             String message = request.getOrDefault("message", "");
-            String body = "New demo request received:\n\n" +
-                    "Name:         " + request.get("name") + "\n" +
-                    "Email:        " + request.get("email") + "\n" +
-                    "Organization: " + request.get("organization") + "\n" +
-                    "Request ID:   " + request.get("id") + "\n" +
-                    "Submitted:    " + request.get("submittedAt") + "\n" +
-                    (message.isEmpty() ? "" : "\nMessage:\n" + message + "\n");
-            m.setText(body);
+            if (!fromEmail.isEmpty()) m.setReplyTo(fromEmail);
+
+            m.setSubject("New demo request — " + fromName + " @ " + org);
+
+            // Re-format the canonical ISO timestamp into something a
+            // human reading the email at 10pm can scan at a glance.
+            // Source IST because both the inbox and the requester are
+            // typically in that timezone; we also keep the UTC form for
+            // anyone correlating across time zones.
+            String humanWhen;
+            try {
+                ZonedDateTime ist = Instant.parse(request.get("submittedAt"))
+                        .atZone(ZoneId.of("Asia/Kolkata"));
+                humanWhen = ist.format(DateTimeFormatter.ofPattern("d MMM yyyy, h:mm a 'IST'"))
+                        + "   (" + request.get("submittedAt") + ")";
+            } catch (Exception parseFailed) {
+                humanWhen = request.get("submittedAt");
+            }
+
+            StringBuilder body = new StringBuilder();
+            body.append("Demo request from ").append(fromName)
+                .append(" (").append(org).append(").\n\n");
+            body.append("Reply to this email to reach the customer directly.\n\n");
+            body.append("  Name          ").append(fromName).append('\n');
+            body.append("  Email         ").append(fromEmail).append('\n');
+            body.append("  Organization  ").append(org).append('\n');
+            body.append("  Submitted     ").append(humanWhen).append('\n');
+            body.append("  Request ID    ").append(request.get("id")).append('\n');
+            if (!message.isEmpty()) {
+                body.append('\n').append("Message:\n").append(message).append('\n');
+            }
+            m.setText(body.toString());
 
             if (sigBase64 != null) {
                 mime.setHeader("X-Qudo-Signature-Alg", SIG_ALG);
