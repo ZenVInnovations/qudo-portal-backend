@@ -100,11 +100,11 @@ public class DemoRequestController {
         String name = form.getOrDefault("name", "").trim();
         String email = form.getOrDefault("email", "").trim();
         String org = form.getOrDefault("organization", "").trim();
-        // Optional free-text message. Caps at 255 chars — matches the
+        // Optional free-text message. Caps at 500 chars — matches the
         // FE textarea cap and stops a paste-bomb from blowing up the
         // notification email payload.
         String message = form.getOrDefault("message", "").trim();
-        if (message.length() > 255) message = message.substring(0, 255);
+        if (message.length() > 500) message = message.substring(0, 500);
 
         List<String> errors = new ArrayList<>();
         if (name.isEmpty()) errors.add("Name is required");
