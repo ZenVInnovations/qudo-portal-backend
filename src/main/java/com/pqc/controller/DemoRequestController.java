@@ -178,33 +178,34 @@ public class DemoRequestController {
 
             m.setSubject("New demo request — " + fromName + " @ " + org);
 
-            // Re-format the canonical ISO timestamp into something a
-            // human reading the email at 10pm can scan at a glance.
-            // Source IST because both the inbox and the requester are
-            // typically in that timezone; we also keep the UTC form for
-            // anyone correlating across time zones.
+            // Human-friendly timestamp in IST (both the inbox and most
+            // requesters live in that timezone). The canonical ISO form
+            // stays in the X-Qudo-Signature surface for correlation;
+            // it's just not shown in the visible body anymore.
             String humanWhen;
             try {
                 ZonedDateTime ist = Instant.parse(request.get("submittedAt"))
                         .atZone(ZoneId.of("Asia/Kolkata"));
-                humanWhen = ist.format(DateTimeFormatter.ofPattern("d MMM yyyy, h:mm a 'IST'"))
-                        + "   (" + request.get("submittedAt") + ")";
+                humanWhen = ist.format(DateTimeFormatter.ofPattern("d MMM yyyy, h:mm a 'IST'"));
             } catch (Exception parseFailed) {
                 humanWhen = request.get("submittedAt");
             }
 
+            // Lead with the most useful content (who + what they wrote),
+            // then contact + timestamp, then a one-line reply hint, then
+            // the request id as a footer marker. Name + Organization are
+            // not duplicated below the headline — they're already in the
+            // subject and the lede sentence.
             StringBuilder body = new StringBuilder();
-            body.append("Demo request from ").append(fromName)
-                .append(" (").append(org).append(").\n\n");
-            body.append("Reply to this email to reach the customer directly.\n\n");
-            body.append("  Name          ").append(fromName).append('\n');
-            body.append("  Email         ").append(fromEmail).append('\n');
-            body.append("  Organization  ").append(org).append('\n');
-            body.append("  Submitted     ").append(humanWhen).append('\n');
-            body.append("  Request ID    ").append(request.get("id")).append('\n');
+            body.append(fromName).append(" from ").append(org)
+                .append(" submitted a demo request.\n\n");
             if (!message.isEmpty()) {
-                body.append('\n').append("Message:\n").append(message).append('\n');
+                body.append("  \"").append(message).append("\"\n\n");
             }
+            body.append("Email      ").append(fromEmail).append('\n');
+            body.append("Submitted  ").append(humanWhen).append("\n\n");
+            body.append("Reply to this email to reach them directly.\n\n");
+            body.append("— ").append(request.get("id")).append('\n');
             m.setText(body.toString());
 
             if (sigBase64 != null) {
