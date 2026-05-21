@@ -57,23 +57,6 @@
         <!-- Persistence: Postgres + JPA + Flyway. Stores users (and audit /
              demo-request rows later). H2 fallback profile available for dev
              smoke tests but Postgres is the production target. -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-jpa</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.postgresql</groupId>
-            <artifactId>postgresql</artifactId>
-            <scope>runtime</scope>
-        </dependency>
-        <!-- Spring Boot 3.2.x manages Flyway 9.x, which bundles all DB-specific
-             support into flyway-core. Bump the version + add
-             flyway-database-postgresql when we move to Spring Boot 3.3+. -->
-        <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-core</artifactId>
-        </dependency>
-
         <!-- Qudo JNI crypto provider (FIPS 203/204/205 algorithms via OpenSSL).
              Installed locally from libs/ before build — see README for the
              one-time mvn install:install-file command. -->
@@ -104,20 +87,6 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <!-- Testcontainers spins up real Postgres for tests so we get
-             production parity (UUID, TIMESTAMPTZ) without Flyway H2 quirks. -->
-        <dependency>
-            <groupId>org.testcontainers</groupId>
-            <artifactId>junit-jupiter</artifactId>
-            <version>1.19.7</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.testcontainers</groupId>
-            <artifactId>postgresql</artifactId>
-            <version>1.19.7</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

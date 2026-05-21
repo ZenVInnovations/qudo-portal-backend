@@ -1,13 +1,4 @@
-# Test profile overrides. The Postgres URL/username/password are injected
-# dynamically by AbstractIntegrationTest's @DynamicPropertySource hook from
-# the Testcontainers Postgres instance — see the test base class.
-
-spring:
-  jpa:
-    hibernate:
-      ddl-auto: validate
-  flyway:
-    enabled: true
+# Test profile overrides.
 
 app:
   scanner:
@@ -16,4 +7,3 @@ app:
 logging:
   level:
     "[com.pqc]": INFO
-    "[org.hibernate]": WARN

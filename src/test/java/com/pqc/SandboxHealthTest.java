@@ -2,9 +2,11 @@ package com.pqc;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.ActiveProfiles;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -17,7 +19,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * removed because they duplicated the same primitives in use-case-specific
  * envelopes. Migration content for those use cases lives in the docs.</p>
  */
-class SandboxHealthTest extends AbstractIntegrationTest {
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@ActiveProfiles("test")
+class SandboxHealthTest {
 
     @Autowired TestRestTemplate rest;
     @LocalServerPort int port;
