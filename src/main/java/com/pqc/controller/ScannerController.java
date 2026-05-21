@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSession;
@@ -15,13 +16,19 @@ import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.net.Inet4Address;
+import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.security.SecureRandom;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -67,7 +74,11 @@ public class ScannerController {
     @Value("${app.scanner.enabled:true}")
     private boolean scannerEnabled;
 
-    @Value("${app.scanner.allow-private-addresses:true}")
+    // Production default is false — the scanner is exposed on a public
+    // endpoint and must not be turnable into an SSRF reflector against
+    // the BE's internal network. Local development can override this in
+    // application-local.properties.
+    @Value("${app.scanner.allow-private-addresses:false}")
     private boolean allowPrivateAddresses;
 
     @Value("${app.scanner.max-output-bytes:65536}")
@@ -86,27 +97,31 @@ public class ScannerController {
                     "error", "Invalid host format",
                     "hint", "Use hostname or IP with optional port (e.g. example.com:443 or 10.0.0.1:8443)"));
         }
-        String ssrfRejection = checkSsrf(host);
-        if (ssrfRejection != null) {
+        // Single-shot resolve + SSRF validation. Done once at the start
+        // of the request, then the resolved InetAddress is passed to
+        // BOTH the JSSE handshake and the openssl probe so neither
+        // re-resolves and an attacker-controlled DNS server can't flip
+        // between a public IP (passes the check) and a private IP (used
+        // for the connection).
+        Resolved resolved;
+        try {
+            resolved = resolveAndValidate(host);
+        } catch (java.net.UnknownHostException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "Couldn't resolve hostname",
+                    "hint", "\"" + hostnamePart(host) + "\" doesn't resolve. Check the spelling, or verify the host exists in public DNS."));
+        }
+        if (resolved.rejection() != null) {
             log.warn("Scanner request rejected (SSRF guard): {}", host);
             return ResponseEntity.status(403).body(Map.of(
                     "error", "Target rejected by SSRF guard",
-                    "hint", ssrfRejection));
-        }
-        // Resolve DNS up front. Without this, an unresolvable host (typo,
-        // dead domain) takes ~30 s as the TLS connect times out. Fail
-        // fast with a clear message instead.
-        String dnsRejection = resolveOrError(host);
-        if (dnsRejection != null) {
-            return ResponseEntity.badRequest().body(Map.of(
-                    "error", "Couldn't resolve hostname",
-                    "hint", dnsRejection));
+                    "hint", resolved.rejection()));
         }
         // openssl is no longer required for the basic scan — JSSE does it.
-        // If openssl is missing we just skip the PQC capability probe.
+        // If openssl is missing we just skip the TLS 1.3 group probe.
 
         try {
-            String rawOutput = observeTlsViaJsse(host);
+            String rawOutput = observeTlsViaJsse(host, resolved.address());
             Map<String, String> tlsInfo = parseTlsInfo(rawOutput);
             // For TLS 1.3 sessions, JSSE doesn't tell us the negotiated
             // named group — recover it via a small openssl probe. The
@@ -115,7 +130,7 @@ public class ScannerController {
             // group the server picked. Skipped for TLS 1.2 (kex is in
             // the ciphersuite name already) and when openssl is absent.
             if ("TLSv1.3".equals(tlsInfo.get("tlsVersion"))) {
-                String group = probeTls13Group(host);
+                String group = probeTls13Group(host, resolved.address());
                 if (group != null) {
                     tlsInfo.put("keyExchange", group);
                     rawOutput += "# probe: tls1_3-group\nNegotiated TLS1.3 group: " + group + "\n";
@@ -180,23 +195,24 @@ public class ScannerController {
                         "error", "Invalid host format."));
                 continue;
             }
-            String ssrfRejection = checkSsrf(host);
-            if (ssrfRejection != null) {
-                results.add(Map.of("endpoint", host, "score", 0, "scoreLabel", "Rejected",
-                        "error", "SSRF guard: " + ssrfRejection));
+            Resolved resolved;
+            try {
+                resolved = resolveAndValidate(host);
+            } catch (java.net.UnknownHostException e) {
+                results.add(Map.of("endpoint", host, "score", 0, "scoreLabel", "Error",
+                        "error", "DNS resolution failed for \"" + hostnamePart(host) + "\"."));
                 continue;
             }
-            String dnsRejection = resolveOrError(host);
-            if (dnsRejection != null) {
-                results.add(Map.of("endpoint", host, "score", 0, "scoreLabel", "Error",
-                        "error", dnsRejection));
+            if (resolved.rejection() != null) {
+                results.add(Map.of("endpoint", host, "score", 0, "scoreLabel", "Rejected",
+                        "error", "SSRF guard: " + resolved.rejection()));
                 continue;
             }
             try {
-                String rawOutput = observeTlsViaJsse(host);
+                String rawOutput = observeTlsViaJsse(host, resolved.address());
                 Map<String, String> tlsInfo = parseTlsInfo(rawOutput);
                 if ("TLSv1.3".equals(tlsInfo.get("tlsVersion"))) {
-                    String group = probeTls13Group(host);
+                    String group = probeTls13Group(host, resolved.address());
                     if (group != null) tlsInfo.put("keyExchange", group);
                 }
                 List<Map<String, String>> inventory = buildInventory(tlsInfo);
@@ -231,63 +247,131 @@ public class ScannerController {
     /**
      * SSRF defence. Resolves the hostname and rejects targets that point at
      * loopback / link-local / RFC-1918 / multicast / cloud metadata addresses
-     * unless {@code app.scanner.allow-private-addresses} is true. Prevents
-     * the scanner from being used as a reflector against internal services
-     * (e.g. 169.254.169.254 metadata, 10.x kube-apiserver, 192.168.x routers).
-     *
-     * @return {@code null} when the target is acceptable, otherwise a
-     *         human-readable rejection reason for the API response.
+     * unless {@code app.scanner.allow-private-addresses} is true.
      */
-    private String checkSsrf(String host) {
-        if (allowPrivateAddresses) return null;
-        String hostname = host.contains(":") ? host.substring(0, host.lastIndexOf(':')) : host;
-        try {
-            InetAddress[] addresses = InetAddress.getAllByName(hostname);
-            for (InetAddress addr : addresses) {
-                if (addr.isAnyLocalAddress()) return "wildcard / 0.0.0.0";
-                if (addr.isLoopbackAddress()) return "loopback (127.0.0.0/8, ::1)";
-                if (addr.isLinkLocalAddress()) return "link-local (169.254.0.0/16, fe80::/10) — includes cloud metadata endpoints";
-                if (addr.isSiteLocalAddress()) return "RFC-1918 private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)";
-                if (addr.isMulticastAddress()) return "multicast";
-            }
-            return null;
-        } catch (Exception e) {
-            return "DNS resolution failed for " + hostname;
-        }
+
+    /** Output of a single-shot resolve+SSRF validation. */
+    private record Resolved(InetAddress address, String rejection) {}
+
+    /** The hostname portion of a host[:port] string, for SNI / error messages. */
+    private static String hostnamePart(String host) {
+        return host.contains(":") ? host.substring(0, host.lastIndexOf(':')) : host;
     }
 
     /**
-     * Run DNS resolution against the hostname portion of {@code host} so
-     * we can fail fast with an actionable error instead of letting
-     * openssl spend ~30 s timing out across three probes.
+     * Resolve DNS once and validate the result against the SSRF policy
+     * in a single shot. The returned {@link Resolved#address()} is the
+     * concrete IP that downstream code MUST connect to — passing the
+     * hostname back to JSSE / openssl would let an attacker-controlled
+     * authoritative DNS server flip between a public IP (which passes
+     * this check) and a private IP (which gets used for the actual
+     * connection). This is the DNS-rebinding mitigation.
      *
-     * @return {@code null} when the hostname resolves; a human-readable
-     *         error message ready for the JSON body when it doesn't.
+     * <p>If any address the hostname resolves to is private or
+     * reserved, the whole hostname is rejected — not just the offending
+     * address — because a re-resolution at connect time would pick a
+     * different address from the same set.</p>
+     *
+     * @throws java.net.UnknownHostException when the hostname doesn't resolve
      */
-    private String resolveOrError(String host) {
-        String hostname = host.contains(":") ? host.substring(0, host.lastIndexOf(':')) : host;
-        try {
-            InetAddress[] addrs = InetAddress.getAllByName(hostname);
-            return addrs.length == 0
-                    ? "DNS lookup returned no addresses for \"" + hostname + "\". Check the spelling."
-                    : null;
-        } catch (java.net.UnknownHostException e) {
-            return "\"" + hostname + "\" doesn't resolve. Check the spelling, or verify the host exists in public DNS.";
-        } catch (Exception e) {
-            return "DNS lookup failed for \"" + hostname + "\": " + e.getMessage();
+    private Resolved resolveAndValidate(String host) throws java.net.UnknownHostException {
+        String hostname = hostnamePart(host);
+        InetAddress[] addrs = InetAddress.getAllByName(hostname);
+        if (addrs.length == 0) {
+            throw new java.net.UnknownHostException(hostname);
         }
+        if (!allowPrivateAddresses) {
+            for (InetAddress addr : addrs) {
+                String rejection = privateOrReservedReason(addr);
+                if (rejection != null) return new Resolved(null, rejection);
+            }
+        }
+        // Prefer IPv4 for the connection — broader server support and the
+        // SSRF check has covered both families regardless.
+        InetAddress picked = Arrays.stream(addrs)
+                .filter(a -> a instanceof Inet4Address)
+                .findFirst()
+                .orElse(addrs[0]);
+        return new Resolved(picked, null);
+    }
+
+    /**
+     * Returns a human-readable rejection reason if the address falls in
+     * a private/reserved range, otherwise {@code null}. Goes beyond
+     * Java's built-in checks ({@code isSiteLocalAddress} is IPv4-only,
+     * {@code isLinkLocalAddress} misses some ranges) by inspecting the
+     * raw byte prefix for IPv6 ULA and IPv4-mapped IPv6.
+     */
+    private String privateOrReservedReason(InetAddress addr) {
+        if (addr.isAnyLocalAddress()) return "wildcard (0.0.0.0, ::)";
+        if (addr.isLoopbackAddress()) return "loopback (127.0.0.0/8, ::1)";
+        if (addr.isLinkLocalAddress()) return "link-local (169.254.0.0/16, fe80::/10) — includes cloud metadata endpoints";
+        if (addr.isSiteLocalAddress()) return "RFC-1918 private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)";
+        if (addr.isMulticastAddress()) return "multicast";
+        byte[] b = addr.getAddress();
+        // IPv4 broadcast & shared address space — Java doesn't flag these.
+        if (b.length == 4) {
+            int o0 = b[0] & 0xFF;
+            if (o0 == 255) return "broadcast (255.0.0.0/8)";
+            if (o0 == 100 && (b[1] & 0xFF) >= 64 && (b[1] & 0xFF) <= 127) {
+                return "CGNAT shared address space (100.64.0.0/10)";
+            }
+        }
+        // IPv6 unique local addresses (ULA) — fc00::/7. Java's
+        // isSiteLocalAddress doesn't cover this; we check the byte prefix.
+        if (b.length == 16 && (b[0] & 0xFE) == 0xFC) {
+            return "IPv6 unique local address (fc00::/7)";
+        }
+        // IPv6 IPv4-mapped (::ffff:0:0/96). Re-check the embedded v4 so
+        // an attacker can't smuggle a private v4 inside a v6 wrapper.
+        if (b.length == 16
+                && b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0
+                && b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0
+                && b[8] == 0 && b[9] == 0
+                && (b[10] & 0xFF) == 0xFF && (b[11] & 0xFF) == 0xFF) {
+            try {
+                InetAddress embedded = InetAddress.getByAddress(
+                        new byte[]{b[12], b[13], b[14], b[15]});
+                String inner = privateOrReservedReason(embedded);
+                if (inner != null) return "IPv4-mapped IPv6 wrapping " + inner;
+            } catch (Exception ignored) {
+                return "IPv4-mapped IPv6 with unparseable embedded address";
+            }
+        }
+        // 2001:db8::/32 — documentation range, never legitimate traffic.
+        if (b.length == 16 && b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0D && b[3] == (byte) 0xB8) {
+            return "IPv6 documentation range (2001:db8::/32)";
+        }
+        return null;
     }
 
     private boolean opensslAvailable() {
         if (opensslAvailableCache != null) return opensslAvailableCache;
         try {
-            Process p = new ProcessBuilder("openssl", "version").redirectErrorStream(true).start();
+            ProcessBuilder pb = new ProcessBuilder("openssl", "version").redirectErrorStream(true);
+            scrubEnv(pb);
+            Process p = pb.start();
             p.waitFor(3, TimeUnit.SECONDS);
             opensslAvailableCache = p.exitValue() == 0;
         } catch (Exception e) {
             opensslAvailableCache = false;
         }
         return opensslAvailableCache;
+    }
+
+    /**
+     * Strip the inherited JVM environment down to a minimal allowlist
+     * before spawning openssl. Without this, every env var on the BE —
+     * DB passwords, signing keys, AWS creds — is visible to the child.
+     * openssl normally doesn't read these, but a tampered binary or a
+     * malicious {@code OPENSSL_CONF} / {@code LD_PRELOAD} could.
+     */
+    private void scrubEnv(ProcessBuilder pb) {
+        String path = System.getenv("PATH");
+        pb.environment().clear();
+        if (path != null) pb.environment().put("PATH", path);
+        // Force a sane locale so openssl output is parseable across hosts.
+        pb.environment().put("LC_ALL", "C");
     }
 
     // ===== Probe stages =====
@@ -310,8 +394,8 @@ public class ScannerController {
      *         original openssl shell-out produced, so
      *         {@link #parseTlsInfo(String)} keeps working unchanged.
      */
-    private String observeTlsViaJsse(String host) throws Exception {
-        String hostname = host.contains(":") ? host.substring(0, host.lastIndexOf(':')) : host;
+    private String observeTlsViaJsse(String host, InetAddress resolvedAddr) throws Exception {
+        String hostname = hostnamePart(host);
         int port = host.contains(":")
                 ? Integer.parseInt(host.substring(host.lastIndexOf(':') + 1))
                 : 443;
@@ -325,12 +409,18 @@ public class ScannerController {
 
         SSLSocketFactory factory = ctx.getSocketFactory();
         try (SSLSocket sock = (SSLSocket) factory.createSocket()) {
-            sock.connect(new InetSocketAddress(hostname, port), 5_000);
+            // Connect to the pre-resolved IP, NOT the hostname. Prevents
+            // a second DNS lookup that could land on a different (private)
+            // address. See resolveAndValidate() javadoc.
+            sock.connect(new InetSocketAddress(resolvedAddr, port), 5_000);
             sock.setSoTimeout(5_000);
             sock.setEnabledProtocols(new String[]{"TLSv1.3", "TLSv1.2"});
-            // Disable hostname verification — see method javadoc.
+            // Disable hostname verification — see method javadoc — but
+            // do send the original hostname in SNI so name-based virtual
+            // hosting at the target still works.
             SSLParameters params = sock.getSSLParameters();
             params.setEndpointIdentificationAlgorithm(null);
+            params.setServerNames(List.of(new SNIHostName(hostname)));
             sock.setSSLParameters(params);
             sock.startHandshake();
 
@@ -365,30 +455,58 @@ public class ScannerController {
      *         or {@code "X25519"}), or {@code null} when we couldn't
      *         determine it.
      */
-    private String probeTls13Group(String host) {
+    private String probeTls13Group(String host, InetAddress resolvedAddr) {
         if (!opensslAvailable()) return null;
+        String hostname = hostnamePart(host);
+        int port = host.contains(":")
+                ? Integer.parseInt(host.substring(host.lastIndexOf(':') + 1))
+                : 443;
+        // Connect by literal IP (DNS-rebinding-safe), force SNI to the
+        // original hostname so the server picks the right vhost.
+        String connectArg = resolvedAddr instanceof Inet6Address
+                ? "[" + resolvedAddr.getHostAddress() + "]:" + port
+                : resolvedAddr.getHostAddress() + ":" + port;
+
+        Process p = null;
+        ExecutorService exec = null;
         try {
             ProcessBuilder pb = new ProcessBuilder(
-                    "openssl", "s_client", "-connect", host, "-brief",
-                    "-tls1_3", "-groups", "X25519MLKEM768:X25519:P-384:P-256");
+                    "openssl", "s_client",
+                    "-connect", connectArg,
+                    "-servername", hostname,
+                    "-brief", "-tls1_3",
+                    "-groups", "X25519MLKEM768:X25519:P-384:P-256");
             pb.redirectErrorStream(true);
-            Process p = pb.start();
+            scrubEnv(pb);
+            p = pb.start();
             try { p.getOutputStream().write("Q\n".getBytes()); p.getOutputStream().flush(); }
             catch (Exception ignored) { /* process may have exited already */ }
 
-            StringBuilder output = new StringBuilder();
-            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                String line;
-                while ((line = r.readLine()) != null) {
-                    output.append(line).append('\n');
-                    if (output.length() >= maxOutputBytes) break;
+            // Hard read deadline via a worker thread. If openssl hangs
+            // without writing anything, BufferedReader.readLine blocks
+            // forever and the later waitFor() never fires. Future.get
+            // with a timeout caps the total time we'll wait for output.
+            final Process proc = p;
+            exec = Executors.newSingleThreadExecutor();
+            Future<String> task = exec.submit(() -> {
+                StringBuilder out = new StringBuilder();
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(proc.getInputStream()))) {
+                    String line;
+                    while ((line = r.readLine()) != null) {
+                        out.append(line).append('\n');
+                        if (out.length() >= maxOutputBytes) break;
+                    }
                 }
-            }
-            if (!p.waitFor(5, TimeUnit.SECONDS)) {
-                p.destroyForcibly();
+                return out.toString();
+            });
+
+            String raw;
+            try {
+                raw = task.get(5, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                log.debug("TLS 1.3 group probe timed out for {}", host);
                 return null;
             }
-            String raw = output.toString();
             // openssl 3.x with -brief reports the group as either
             //   "Negotiated TLS1.3 group: <name>"   (older line)
             //   "Peer Temp Key: <name>, <bits> bits"  (3.x +)
@@ -401,6 +519,9 @@ public class ScannerController {
         } catch (Exception e) {
             log.debug("TLS 1.3 group probe failed for {}: {}", host, e.toString());
             return null;
+        } finally {
+            if (p != null && p.isAlive()) p.destroyForcibly();
+            if (exec != null) exec.shutdownNow();
         }
     }
 

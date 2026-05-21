@@ -95,11 +95,13 @@ app:
     # to disable the endpoint entirely (returns 503 instead of probing).
     enabled: ${APP_SCANNER_ENABLED:true}
     # Allow scanning loopback / RFC-1918 / link-local addresses. Defaults
-    # to true for dev convenience (so localhost:8443 works); set to false
-    # in any deployment that's reachable from untrusted networks — prevents
-    # the scanner from being used as an SSRF reflector against the host's
-    # internal network or cloud metadata endpoints (169.254.169.254).
-    allow-private-addresses: ${APP_SCANNER_ALLOW_PRIVATE:true}
+    # to FALSE — the scanner is exposed publicly and must never be
+    # turnable into an SSRF reflector against the BE's internal network
+    # or cloud metadata endpoints (169.254.169.254). Set
+    # APP_SCANNER_ALLOW_PRIVATE=true ONLY for local dev runs against
+    # localhost:8443, never for any deployment reachable from untrusted
+    # networks.
+    allow-private-addresses: ${APP_SCANNER_ALLOW_PRIVATE:false}
     # Cap on captured openssl output bytes — defends against an oversized
     # response from a malicious target trying to OOM the BE.
     max-output-bytes: ${APP_SCANNER_MAX_OUTPUT_BYTES:65536}
