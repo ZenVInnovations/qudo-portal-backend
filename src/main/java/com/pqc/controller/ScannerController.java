@@ -6,26 +6,51 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.security.SecureRandom;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * TLS posture scanner. Shells out to the system openssl binary's s_client to
- * probe a target endpoint, then parses the handshake to assess PQC readiness.
+ * TLS posture scanner. Two-phase observation of a remote endpoint:
  *
- * <p>Three probes are tried in order so classical servers still yield readable
- * info: TLS 1.3 with PQC groups, TLS 1.3 default, TLS 1.2 default. The first
- * probe that negotiates anything is annotated and returned.</p>
+ * <ol>
+ *   <li><b>JSSE handshake (always).</b> A pure-Java TLS connection via
+ *   {@link SSLSocket} captures the TLS version, ciphersuite, certificate
+ *   chain, and (for TLS 1.2) the kex from the ciphersuite name. No process
+ *   spawn, no openssl dependency for the common path. Hostname verification
+ *   is disabled because we're inspecting third-party endpoints — including
+ *   ones with self-signed or expired certs — not making trusted
+ *   connections.</li>
  *
- * <p>This requires {@code openssl} (3.x recommended) installed on the host
- * running the BE. For full PQC group detection ({@code X25519MLKEM768}), the
- * Qudo OpenSSL provider should be installed and activated in
- * {@code openssl.cnf} — see the Get Started guide.</p>
+ *   <li><b>Optional PQC capability probe.</b> Only when the JSSE
+ *   handshake succeeds we shell out to {@code openssl s_client} with
+ *   {@code -groups X25519MLKEM768} to test whether the remote server
+ *   would negotiate a PQC hybrid group. This is the one bit of data
+ *   stock Java cannot give us, because JSSE has no native ML-KEM
+ *   support. We capture only that bit; everything else comes from
+ *   Phase 1.</li>
+ * </ol>
+ *
+ * <p>The PQC probe requires {@code openssl} (3.x recommended) on the host
+ * with the Qudo OpenSSL provider installed and activated in
+ * {@code openssl.cnf} — see the Get Started guide. When openssl isn't
+ * available, the scan still works and just reports PQC capability as
+ * "not detected".</p>
  *
  * Ported from the legacy ui-dashboard CryptoInventoryController; URL moved
  * from {@code /api/crypto-inventory/scan} to {@code /api/v1/scan} to fit the
@@ -69,24 +94,29 @@ public class ScannerController {
                     "hint", ssrfRejection));
         }
         // Resolve DNS up front. Without this, an unresolvable host (typo,
-        // dead domain) takes ~30 s as openssl times out across all three
-        // probes — and the resulting broken-pipe IOException leaks as a
-        // 500. Fail fast with a clear message instead.
+        // dead domain) takes ~30 s as the TLS connect times out. Fail
+        // fast with a clear message instead.
         String dnsRejection = resolveOrError(host);
         if (dnsRejection != null) {
             return ResponseEntity.badRequest().body(Map.of(
                     "error", "Couldn't resolve hostname",
                     "hint", dnsRejection));
         }
-        if (!opensslAvailable()) {
-            return ResponseEntity.status(503).body(Map.of(
-                    "error", "openssl binary not found on this server",
-                    "hint", "Install openssl 3.x and ensure it's on PATH so the scanner can probe TLS endpoints."));
-        }
+        // openssl is no longer required for the basic scan — JSSE does it.
+        // If openssl is missing we just skip the PQC capability probe.
 
         try {
-            String rawOutput = runOpenssl(host);
+            String rawOutput = observeTlsViaJsse(host);
             Map<String, String> tlsInfo = parseTlsInfo(rawOutput);
+            // PQC capability check is optional best-effort. Patches the
+            // keyExchange field when MLKEM is negotiated; otherwise leave
+            // tlsInfo to reflect the JSSE handshake (which by definition
+            // didn't speak PQC).
+            String pqcGroup = probePqcCapability(host);
+            if (pqcGroup != null) {
+                tlsInfo.put("keyExchange", pqcGroup);
+                rawOutput += "# probe: pqc-capability\nNegotiated TLS1.3 group: " + pqcGroup + "\n";
+            }
             List<Map<String, String>> inventory = buildInventory(tlsInfo);
             int score = calculateScore(inventory);
             List<Map<String, Object>> checklist = buildChecklist(tlsInfo);
@@ -103,9 +133,26 @@ public class ScannerController {
             result.put("scannedAt", System.currentTimeMillis());
 
             return ResponseEntity.ok(result);
+        } catch (javax.net.ssl.SSLHandshakeException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "TLS handshake failed",
+                    "hint", e.getMessage() != null ? e.getMessage() : "Server refused the handshake.",
+                    "endpoint", host));
+        } catch (java.net.SocketTimeoutException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "Connection timed out",
+                    "hint", "Host resolved but didn't respond on TLS within 5 s. Check the port and reachability.",
+                    "endpoint", host));
+        } catch (java.net.ConnectException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "Connection refused",
+                    "hint", e.getMessage() != null ? e.getMessage() : "Port is closed or filtered.",
+                    "endpoint", host));
         } catch (Exception e) {
+            log.warn("Scan error for {}: {}", host, e.toString());
             return ResponseEntity.status(500).body(Map.of(
-                    "error", e.getMessage() != null ? e.getMessage() : "Scan failed",
+                    "error", "Scan failed unexpectedly",
+                    "hint", e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName(),
                     "endpoint", host));
         }
     }
@@ -117,11 +164,9 @@ public class ScannerController {
         }
         @SuppressWarnings("unchecked")
         List<String> hosts = (List<String>) request.getOrDefault("hosts", List.of());
-        if (!opensslAvailable()) {
-            return ResponseEntity.status(503).body(Map.of(
-                    "error", "openssl binary not found on this server",
-                    "hint", "Install openssl and ensure it's on PATH."));
-        }
+        // openssl is no longer required — JSSE handles the basic scan.
+        // The PQC capability probe is best-effort and silently skipped
+        // when openssl isn't present.
 
         List<Map<String, Object>> results = new ArrayList<>();
         for (String rawHost : hosts) {
@@ -144,8 +189,10 @@ public class ScannerController {
                 continue;
             }
             try {
-                String rawOutput = runOpenssl(host);
+                String rawOutput = observeTlsViaJsse(host);
                 Map<String, String> tlsInfo = parseTlsInfo(rawOutput);
+                String pqcGroup = probePqcCapability(host);
+                if (pqcGroup != null) tlsInfo.put("keyExchange", pqcGroup);
                 List<Map<String, String>> inventory = buildInventory(tlsInfo);
                 int score = calculateScore(inventory);
                 String label = score >= 80 ? "Quantum-Ready" : score >= 50 ? "Partially Ready" : "At Risk";
@@ -240,61 +287,102 @@ public class ScannerController {
     // ===== Probe stages =====
 
     /**
-     * Probe in stages so classical servers still yield readable info:
-     *   1) TLS 1.3 + PQC groups (captures quantum-safe servers)
-     *   2) TLS 1.3, default groups (captures classical TLS 1.3 — X25519/P-256)
-     *   3) TLS 1.2 default (legacy servers; kex in cipher-suite name)
+     * Phase 1: pure-Java TLS handshake. Captures protocol version,
+     * ciphersuite, the leaf certificate's signature algorithm, and the
+     * peer principal. For TLS 1.2 the kex (ECDHE/DHE/RSA) is embedded in
+     * the ciphersuite name; for TLS 1.3 JSSE doesn't expose the
+     * negotiated named group, so we mark it as "not reported" and let
+     * the PQC probe in phase 2 detect quantum-safe capability.
+     *
+     * Hostname verification is OFF and the trust manager accepts any
+     * certificate. We're inspecting third-party endpoints — including
+     * ones with self-signed, expired, or hostname-mismatched certs.
+     * We are not exchanging data with them; we just want to read the
+     * handshake.
+     *
+     * @return an output blob in the same line-oriented format the
+     *         original openssl shell-out produced, so
+     *         {@link #parseTlsInfo(String)} keeps working unchanged.
      */
-    private String runOpenssl(String host) throws Exception {
-        String[][] probes = {
-                {"tls1_3-pqc", "-tls1_3", "-groups", "X25519MLKEM768:X25519:P-384"},
-                {"tls1_3", "-tls1_3"},
-                {"tls1_2", "-tls1_2"}
-        };
-        String lastOutput = "";
-        for (String[] probe : probes) {
-            String mode = probe[0];
-            List<String> cmd = new ArrayList<>(List.of("openssl", "s_client", "-connect", host, "-brief"));
-            for (int i = 1; i < probe.length; i++) cmd.add(probe[i]);
+    private String observeTlsViaJsse(String host) throws Exception {
+        String hostname = host.contains(":") ? host.substring(0, host.lastIndexOf(':')) : host;
+        int port = host.contains(":")
+                ? Integer.parseInt(host.substring(host.lastIndexOf(':') + 1))
+                : 443;
 
-            ProcessBuilder pb = new ProcessBuilder(cmd);
+        SSLContext ctx = SSLContext.getInstance("TLS");
+        ctx.init(null, new TrustManager[]{new X509TrustManager() {
+            public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+            public void checkClientTrusted(X509Certificate[] c, String t) {}
+            public void checkServerTrusted(X509Certificate[] c, String t) {}
+        }}, new SecureRandom());
+
+        SSLSocketFactory factory = ctx.getSocketFactory();
+        try (SSLSocket sock = (SSLSocket) factory.createSocket()) {
+            sock.connect(new InetSocketAddress(hostname, port), 5_000);
+            sock.setSoTimeout(5_000);
+            sock.setEnabledProtocols(new String[]{"TLSv1.3", "TLSv1.2"});
+            // Disable hostname verification — see method javadoc.
+            SSLParameters params = sock.getSSLParameters();
+            params.setEndpointIdentificationAlgorithm(null);
+            sock.setSSLParameters(params);
+            sock.startHandshake();
+
+            SSLSession session = sock.getSession();
+            StringBuilder out = new StringBuilder("# probe: jsse\n");
+            out.append("Protocol version: ").append(session.getProtocol()).append('\n');
+            out.append("Ciphersuite: ").append(session.getCipherSuite()).append('\n');
+            Certificate[] chain = session.getPeerCertificates();
+            if (chain.length > 0 && chain[0] instanceof X509Certificate leaf) {
+                out.append("Signature type: ").append(leaf.getSigAlgName()).append('\n');
+                out.append("Peer certificate: ").append(leaf.getSubjectX500Principal().getName()).append('\n');
+            }
+            return out.toString();
+        }
+    }
+
+    /**
+     * Phase 2: tiny openssl probe asking specifically whether the
+     * server will negotiate the {@code X25519MLKEM768} hybrid group.
+     * Best-effort — when openssl isn't installed or the probe times
+     * out, we just don't claim PQC capability.
+     *
+     * @return the negotiated group name (e.g. {@code "X25519MLKEM768"})
+     *         if PQC was negotiated, {@code null} otherwise.
+     */
+    private String probePqcCapability(String host) {
+        if (!opensslAvailable()) return null;
+        try {
+            ProcessBuilder pb = new ProcessBuilder(
+                    "openssl", "s_client", "-connect", host, "-brief",
+                    "-tls1_3", "-groups", "X25519MLKEM768");
             pb.redirectErrorStream(true);
             Process p = pb.start();
-            p.getOutputStream().write("Q\n".getBytes());
-            p.getOutputStream().flush();
+            try { p.getOutputStream().write("Q\n".getBytes()); p.getOutputStream().flush(); }
+            catch (Exception ignored) { /* process may have exited already */ }
 
-            // Cap captured output to prevent OOM from a malicious target. Once
-            // we hit the cap we stop reading but keep the partial output for
-            // parsing — the relevant TLS handshake lines come early.
             StringBuilder output = new StringBuilder();
             try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
                 String line;
                 while ((line = r.readLine()) != null) {
-                    output.append(line).append("\n");
-                    if (output.length() >= maxOutputBytes) {
-                        log.warn("Scanner output cap hit for {} (probe={}); truncating", host, mode);
-                        break;
-                    }
+                    output.append(line).append('\n');
+                    if (output.length() >= maxOutputBytes) break;
                 }
             }
-            boolean completed = p.waitFor(10, TimeUnit.SECONDS);
-            if (!completed) {
+            if (!p.waitFor(5, TimeUnit.SECONDS)) {
                 p.destroyForcibly();
-                p.waitFor(2, TimeUnit.SECONDS);  // give it a beat to die
-                continue;
+                return null;
             }
-
             String raw = output.toString();
-            lastOutput = raw;
-            if (Pattern.compile("Protocol version:\\s*\\S+").matcher(raw).find()
-                    || Pattern.compile("Ciphersuite:\\s*\\S+").matcher(raw).find()) {
-                return "# probe: " + mode + "\n" + raw;
+            Matcher m = Pattern.compile("Negotiated TLS1\\.3 group:\\s*(\\S+)").matcher(raw);
+            if (m.find() && m.group(1).toUpperCase().contains("MLKEM")) {
+                return m.group(1).trim();
             }
+            return null;
+        } catch (Exception e) {
+            log.debug("PQC probe failed for {}: {}", host, e.toString());
+            return null;
         }
-        if (lastOutput.isEmpty()) {
-            throw new RuntimeException("Connection timed out. Check if the host is reachable.");
-        }
-        return "# probe: failed\n" + lastOutput;
     }
 
     // ===== Parse + assess =====
