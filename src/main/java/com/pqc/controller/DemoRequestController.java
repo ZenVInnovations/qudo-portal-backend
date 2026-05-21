@@ -176,7 +176,7 @@ public class DemoRequestController {
             String message = request.getOrDefault("message", "");
             if (!fromEmail.isEmpty()) m.setReplyTo(fromEmail);
 
-            m.setSubject("New demo request — " + fromName + " @ " + org);
+            m.setSubject("Demo Request — " + fromName + ", " + org);
 
             // Human-friendly timestamp in IST (both the inbox and most
             // requesters live in that timezone). The canonical ISO form
@@ -191,21 +191,25 @@ public class DemoRequestController {
                 humanWhen = request.get("submittedAt");
             }
 
-            // Lead with the most useful content (who + what they wrote),
-            // then contact + timestamp, then a one-line reply hint, then
-            // the request id as a footer marker. Name + Organization are
-            // not duplicated below the headline — they're already in the
-            // subject and the lede sentence.
+            // Customer's words come FIRST — that's the signal of intent
+            // the product owner is reading the email for. Identity +
+            // contact metadata follows, then the reply hint, then the
+            // reference. Avoid breezy phrasing — this lands in a CS
+            // inbox and gets forwarded.
             StringBuilder body = new StringBuilder();
-            body.append(fromName).append(" from ").append(org)
-                .append(" submitted a demo request.\n\n");
+            body.append("A new demo has been requested through the Qudo PQC portal.\n\n");
             if (!message.isEmpty()) {
+                body.append("What the customer wrote:\n\n");
                 body.append("  \"").append(message).append("\"\n\n");
+            } else {
+                body.append("(No additional message provided.)\n\n");
             }
-            body.append("Email      ").append(fromEmail).append('\n');
-            body.append("Submitted  ").append(humanWhen).append("\n\n");
-            body.append("Reply to this email to reach them directly.\n\n");
-            body.append("— ").append(request.get("id")).append('\n');
+            body.append("  Requester     ").append(fromName).append('\n');
+            body.append("  Organization  ").append(org).append('\n');
+            body.append("  Email         ").append(fromEmail).append('\n');
+            body.append("  Submitted     ").append(humanWhen).append('\n');
+            body.append('\n').append("Please reply directly to this email to reach the requester.\n\n");
+            body.append("Reference: ").append(request.get("id")).append('\n');
             m.setText(body.toString());
 
             if (sigBase64 != null) {
