@@ -1,0 +1,30 @@
+# Local-dev profile. Activate with:
+#   SPRING_PROFILES_ACTIVE=local mvn spring-boot:run
+#
+# Loosens a few prod-safe defaults so the developer machine works
+# without surprises (private-address scans, verbose logs, looser rate
+# limits for tinkering). NEVER use this profile in any deployment
+# reachable from untrusted networks — see application-dev.yml /
+# application-prod.yml for those.
+
+app:
+  scanner:
+    # Local dev frequently scans 127.0.0.1 / localhost / 192.168.x.y
+    # endpoints (a dev server on the same machine or LAN), so the SSRF
+    # guard for private addresses is OFF here. The base config defaults
+    # this to false.
+    allow-private-addresses: true
+  ratelimit:
+    # Rate limit stays on so the dev sees production behaviour, but
+    # bursts are doubled to take the edge off normal F5-test loops.
+    sandbox:
+      burst: 40
+    scanner:
+      burst: 10
+
+logging:
+  level:
+    # Surface probe details, rate-limit rejections, and the
+    # demo-notification mail send for easy debugging.
+    "[com.pqc]": DEBUG
+    "[org.springframework.web]": INFO

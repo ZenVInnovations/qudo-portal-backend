@@ -1,0 +1,59 @@
+# Production profile. Activate with:
+#   SPRING_PROFILES_ACTIVE=prod java -jar app.jar
+#
+# Pins every production-safety setting EXPLICITLY (no env-var fallback)
+# so a misconfigured env can't accidentally relax security at deploy
+# time. Most fields below are the same as the base application.yml's
+# defaults — listed here anyway as a defence-in-depth declaration.
+
+app:
+  scanner:
+    # SSRF guard is HARD ON in prod. Public-facing scanner must never
+    # reach loopback / RFC-1918 / link-local — that includes cloud
+    # metadata at 169.254.169.254.
+    allow-private-addresses: false
+  ratelimit:
+    # Production rate budgets — slightly tighter than the base so the
+    # bounded JNI / openssl thread pools have more headroom against
+    # a hostile burst.
+    enabled: true
+    sandbox:
+      rpm: 60
+      burst: 20
+    scanner:
+      rpm: 10
+      burst: 5
+    demo:
+      rpm: 5
+      burst: 3
+
+demo:
+  keys:
+    # Persistent location outside the deploy directory so signing keys
+    # survive container rebuilds. Mount this as a volume in compose.
+    dir: ${DEMO_KEYS_DIR:/var/lib/qudo/keys}
+
+logging:
+  level:
+    # Less noise in production — warn-and-error on framework code,
+    # info on our own classes so demo notifications + scan rejections
+    # still leave a paper trail.
+    "[com.pqc]": INFO
+    "[org.springframework]": WARN
+    "[org.hibernate]": WARN
+    "[org.apache]": WARN
+
+management:
+  endpoint:
+    # Don't expose component-level health details on the public probe.
+    health:
+      show-components: never
+
+server:
+  # Behind a reverse proxy in prod, so trust X-Forwarded-* headers.
+  forward-headers-strategy: native
+  error:
+    # Don't leak stack traces / fully-qualified class names in error
+    # responses to public callers.
+    include-stacktrace: never
+    include-message: never

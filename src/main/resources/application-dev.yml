@@ -1,0 +1,15 @@
+# Dev / staging profile. Activate with:
+#   SPRING_PROFILES_ACTIVE=dev java -jar app.jar
+#
+# Used on the dev-qudopqc.zenv.ai VPS — the publicly reachable staging
+# environment. Inherits the production-safe defaults from the base
+# application.yml (SSRF guard on, rate-limit on, scanner enabled);
+# overrides here are only for things that legitimately differ between
+# dev and prod (logging volume, demo-notify routing).
+
+# Frontend origin and SMTP creds come from env vars on the VPS — see
+# /opt/zenv/qudo-pqc-developer-portal/docker/.env for the wiring.
+
+logging:
+  level:
+    "[com.pqc]": INFO
