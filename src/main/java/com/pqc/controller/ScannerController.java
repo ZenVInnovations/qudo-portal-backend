@@ -68,6 +68,16 @@ public class ScannerController {
                     "error", "Target rejected by SSRF guard",
                     "hint", ssrfRejection));
         }
+        // Resolve DNS up front. Without this, an unresolvable host (typo,
+        // dead domain) takes ~30 s as openssl times out across all three
+        // probes — and the resulting broken-pipe IOException leaks as a
+        // 500. Fail fast with a clear message instead.
+        String dnsRejection = resolveOrError(host);
+        if (dnsRejection != null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "Couldn't resolve hostname",
+                    "hint", dnsRejection));
+        }
         if (!opensslAvailable()) {
             return ResponseEntity.status(503).body(Map.of(
                     "error", "openssl binary not found on this server",
@@ -127,6 +137,12 @@ public class ScannerController {
                         "error", "SSRF guard: " + ssrfRejection));
                 continue;
             }
+            String dnsRejection = resolveOrError(host);
+            if (dnsRejection != null) {
+                results.add(Map.of("endpoint", host, "score", 0, "scoreLabel", "Error",
+                        "error", dnsRejection));
+                continue;
+            }
             try {
                 String rawOutput = runOpenssl(host);
                 Map<String, String> tlsInfo = parseTlsInfo(rawOutput);
@@ -184,6 +200,28 @@ public class ScannerController {
             return null;
         } catch (Exception e) {
             return "DNS resolution failed for " + hostname;
+        }
+    }
+
+    /**
+     * Run DNS resolution against the hostname portion of {@code host} so
+     * we can fail fast with an actionable error instead of letting
+     * openssl spend ~30 s timing out across three probes.
+     *
+     * @return {@code null} when the hostname resolves; a human-readable
+     *         error message ready for the JSON body when it doesn't.
+     */
+    private String resolveOrError(String host) {
+        String hostname = host.contains(":") ? host.substring(0, host.lastIndexOf(':')) : host;
+        try {
+            InetAddress[] addrs = InetAddress.getAllByName(hostname);
+            return addrs.length == 0
+                    ? "DNS lookup returned no addresses for \"" + hostname + "\". Check the spelling."
+                    : null;
+        } catch (java.net.UnknownHostException e) {
+            return "\"" + hostname + "\" doesn't resolve. Check the spelling, or verify the host exists in public DNS.";
+        } catch (Exception e) {
+            return "DNS lookup failed for \"" + hostname + "\": " + e.getMessage();
         }
     }
 
