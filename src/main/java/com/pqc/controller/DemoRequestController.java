@@ -100,8 +100,11 @@ public class DemoRequestController {
         String name = form.getOrDefault("name", "").trim();
         String email = form.getOrDefault("email", "").trim();
         String org = form.getOrDefault("organization", "").trim();
-        String useCase = form.getOrDefault("useCase", "").trim();
-        String timing = form.getOrDefault("timing", "").trim();
+        // Optional free-text message. Caps at 255 chars — matches the
+        // FE textarea cap and stops a paste-bomb from blowing up the
+        // notification email payload.
+        String message = form.getOrDefault("message", "").trim();
+        if (message.length() > 255) message = message.substring(0, 255);
 
         List<String> errors = new ArrayList<>();
         if (name.isEmpty()) errors.add("Name is required");
@@ -118,8 +121,7 @@ public class DemoRequestController {
         request.put("name", name);
         request.put("email", email);
         request.put("organization", org);
-        request.put("useCase", useCase);
-        request.put("timing", timing);
+        request.put("message", message);
         request.put("submittedAt", submittedAt);
         request.put("status", "PENDING");
         requests.add(request);
@@ -169,15 +171,15 @@ public class DemoRequestController {
             m.setSubject("Qudo PQC — Demo Request from " + request.get("name")
                     + " (" + request.get("organization") + ")");
 
+            String message = request.getOrDefault("message", "");
             String body = "New demo request received:\n\n" +
                     "Name:         " + request.get("name") + "\n" +
                     "Email:        " + request.get("email") + "\n" +
                     "Organization: " + request.get("organization") + "\n" +
-                    "Use Case:     " + request.get("useCase") + "\n" +
-                    "Timing:       " + request.get("timing") + "\n" +
                     "Request ID:   " + request.get("id") + "\n" +
-                    "Submitted:    " + request.get("submittedAt") + "\n\n" +
-                    "--\n" +
+                    "Submitted:    " + request.get("submittedAt") + "\n" +
+                    (message.isEmpty() ? "" : "\nMessage:\n" + message + "\n") +
+                    "\n--\n" +
                     "Signed with " + SIG_ALG + " (FIPS 204) via Qudo JNI.\n" +
                     "Delivered over TLS with X25519MLKEM768 hybrid PQC key exchange.\n";
             m.setText(body);
@@ -197,7 +199,12 @@ public class DemoRequestController {
     }
 
     private static String canonicalize(Map<String, String> req) {
-        String[] keys = {"id", "email", "name", "organization", "submittedAt", "timing", "useCase"};
+        // Keys signed by the ML-DSA-65 notification signature. Adding /
+        // removing a field here changes the signature surface, so any
+        // verifier of the X-Qudo-Signature header must use the SAME key
+        // list. `description` was renamed to `message` on 2026-05-21 in
+        // sync with the FE form rename.
+        String[] keys = {"id", "email", "name", "organization", "submittedAt", "message"};
         Arrays.sort(keys);
         StringBuilder sb = new StringBuilder("{");
         for (int i = 0; i < keys.length; i++) {
