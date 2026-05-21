@@ -389,8 +389,15 @@ public class ScannerController {
                 return null;
             }
             String raw = output.toString();
+            // openssl 3.x with -brief reports the group as either
+            //   "Negotiated TLS1.3 group: <name>"   (older line)
+            //   "Peer Temp Key: <name>, <bits> bits"  (3.x +)
+            // Accept both. Strip the trailing ", N bits" suffix.
             Matcher m = Pattern.compile("Negotiated TLS1\\.3 group:\\s*(\\S+)").matcher(raw);
-            return m.find() ? m.group(1).trim() : null;
+            if (m.find()) return m.group(1).trim();
+            m = Pattern.compile("(?:Server|Peer) Temp Key:\\s*([^,\\n]+)").matcher(raw);
+            if (m.find()) return m.group(1).trim();
+            return null;
         } catch (Exception e) {
             log.debug("TLS 1.3 group probe failed for {}: {}", host, e.toString());
             return null;
