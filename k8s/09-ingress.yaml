@@ -1,0 +1,46 @@
+# Cluster Ingress for dev.qudo.zenv.ai.
+#
+# TLS termination happens UPSTREAM on the host-level nginx (port 443 on
+# the VPS). The host nginx then reverse-proxies cleartext HTTP to the
+# RKE2 ingress-nginx's HTTP NodePort. So this Ingress is HTTP-only and
+# we deliberately omit the `tls:` section. cert-manager isn't involved —
+# the existing host-level cert for dev.qudo.zenv.ai stays in place.
+#
+# All paths route to the FE Service. The FE pod's nginx then reverse-
+# proxies /api,/oauth2,/login to the BE Service internally (cluster DNS
+# resolves "qudo-portal-backend:8093"). This keeps the FE image we built
+# and verified end-to-end unchanged — no path-routing migration needed.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: qudo-portal
+  namespace: qudo-portal-dev
+  labels:
+    app.kubernetes.io/name: qudo-portal
+  annotations:
+    # Disable ingress-nginx's automatic HTTP->HTTPS redirect at the
+    # Ingress level — TLS is terminated upstream on the host nginx, so
+    # cluster-internal traffic is HTTP by design. Without this, ingress-
+    # nginx would 308-redirect to https:// and the request would loop.
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    # Demo-request form POSTs are small but the scan endpoints can return
+    # several KB. 1m is plenty of headroom and matches the flutto-dev
+    # convention on this cluster.
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    # The host nginx in front of us sets X-Forwarded-* headers; pass them
+    # through unchanged so the BE's forward-headers-strategy=native picks
+    # up the real client IP for rate-limiting and SSRF-guard logging.
+    nginx.ingress.kubernetes.io/use-forwarded-headers: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: dev.qudo.zenv.ai
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: qudo-portal-frontend
+                port:
+                  number: 80

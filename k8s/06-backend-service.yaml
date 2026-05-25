@@ -1,0 +1,24 @@
+# Cluster-internal Service for the backend.
+#
+# NAME IS LOAD-BEARING. The FE container's nginx.conf has hardcoded:
+#   proxy_pass http://qudo-portal-backend:8093;
+# K8s DNS resolves bare service names within the same namespace, so the FE
+# pod will hit this Service by exactly this name. If you rename it, you
+# must rebuild the FE image with a matching upstream.
+apiVersion: v1
+kind: Service
+metadata:
+  name: qudo-portal-backend
+  namespace: qudo-portal-dev
+  labels:
+    app.kubernetes.io/name: qudo-portal-backend
+    app.kubernetes.io/component: backend
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: qudo-portal-backend
+  ports:
+    - name: http
+      port: 8093
+      targetPort: 8093
+      protocol: TCP

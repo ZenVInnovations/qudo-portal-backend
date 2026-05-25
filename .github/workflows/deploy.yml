@@ -1,0 +1,205 @@
+# Manual deploy — supports both dev and prod.
+#
+# Triggered from Actions tab → "Deploy" → Run workflow. Inputs:
+#   - environment: dev or prod (choice)
+#   - commit_sha:  7-char short SHA of the commit you want live
+#   - version:     human-readable label (v1.0.1, rollback-2026-05-25, etc.)
+#                  Applied as a permanent image tag and a Deployment annotation.
+#   - reason:      Why this deploy is happening (audit trail).
+#
+# Behaviour by environment:
+#
+#   dev  → uses KUBECONFIG_DEV  secret, qudo-portal-dev   namespace,
+#          dev.qudo.zenv.ai     URL,    :dev floating tag, no approval gate.
+#          Use case: redeploy a specific past commit to dev (e.g. for
+#          debugging or rolling back what main.yml auto-deployed).
+#
+#   prod → uses KUBECONFIG_PROD secret, qudo-portal-prod  namespace,
+#          qudo.zenv.ai         URL,    :prod floating tag, approval gate
+#          via the "production" GitHub Environment's required reviewers.
+#          Use case: every prod deploy.
+#
+# Image resolution:
+#
+#   GHCR has ghcr.io/.../qudo-portal-backend:sha-<commit_sha>?
+#   ├── YES → server-side retag (no layer transfer): add :<version> + :<env>
+#   └── NO  → build from the exact commit, push all three tags atomically
+#
+# After a successful deploy, GHCR has these tags pointing at one image:
+#   :sha-<commit_sha>  — immutable, canonical, what manifests pin
+#   :<version>         — permanent human label (e.g. :v1.0.1)
+#   :dev | :prod       — floating alias for "what's currently in that env"
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      commit_sha:
+        description: 'Short commit SHA (7 lowercase hex chars)'
+        required: true
+        type: string
+      version:
+        description: 'Version label (e.g. v1.0.1 or rollback-2026-05-25)'
+        required: true
+        type: string
+      reason:
+        description: 'Why this deploy is happening'
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  deploy:
+    name: ${{ inputs.environment }} ← ${{ inputs.version }} (${{ inputs.commit_sha }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      # GH Environment selection — prod maps to "production" (with required
+      # reviewers); dev maps to "dev" (no approval gate). Configure these
+      # in repo Settings → Environments.
+      name: ${{ inputs.environment == 'prod' && 'production' || 'dev' }}
+      url: ${{ inputs.environment == 'prod' && 'https://qudo.zenv.ai' || 'https://dev.qudo.zenv.ai' }}
+    permissions:
+      contents: read
+      packages: write     # needed for image retag / push
+    env:
+      NAMESPACE: ${{ inputs.environment == 'prod' && 'qudo-portal-prod' || 'qudo-portal-dev' }}
+      PUBLIC_URL: ${{ inputs.environment == 'prod' && 'https://qudo.zenv.ai' || 'https://dev.qudo.zenv.ai' }}
+      # Floating alias: :prod for prod, :dev for dev.
+      ALIAS_TAG: ${{ inputs.environment }}
+    steps:
+      - name: Validate commit SHA format
+        run: |
+          if ! [[ '${{ inputs.commit_sha }}' =~ ^[0-9a-f]{7}$ ]]; then
+            echo "::error::commit_sha must be exactly 7 lowercase hex chars (the short SHA used in image tags). Got: ${{ inputs.commit_sha }}"
+            exit 1
+          fi
+
+      - name: Checkout the exact commit being deployed
+        # Needed by PATH B (build) below. PATH A (retag) doesn't need the
+        # source, but checkout is cheap and unconditional.
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 1
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if image already exists in GHCR
+        id: image_check
+        # continue-on-error lets the next two steps branch on outcome.
+        continue-on-error: true
+        run: |
+          IMAGE='${{ env.IMAGE_NAME }}:sha-${{ inputs.commit_sha }}'
+          echo "Probing $IMAGE..."
+          docker buildx imagetools inspect "$IMAGE" > /dev/null
+
+      - name: PATH A — retag existing image
+        # Normal case: main.yml has already built and pushed :sha-<commit_sha>.
+        # Add :<version> + :dev|:prod as additional names for the same bits.
+        # Server-side manifest write via the OCI distribution API.
+        if: steps.image_check.outcome == 'success'
+        run: |
+          SRC='${{ env.IMAGE_NAME }}:sha-${{ inputs.commit_sha }}'
+          echo "Image already in GHCR — adding tags :${{ inputs.version }} and :${{ env.ALIAS_TAG }}"
+          docker buildx imagetools create --tag '${{ env.IMAGE_NAME }}:${{ inputs.version }}'    "$SRC"
+          docker buildx imagetools create --tag '${{ env.IMAGE_NAME }}:${{ env.ALIAS_TAG }}'      "$SRC"
+
+      - name: PATH B — build + push all three tags (image was missing)
+        # Fallback when main.yml never built the commit. Builds from the
+        # exact checked-out commit and pushes all three tags atomically.
+        if: steps.image_check.outcome == 'failure'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:sha-${{ inputs.commit_sha }}
+            ${{ env.IMAGE_NAME }}:${{ inputs.version }}
+            ${{ env.IMAGE_NAME }}:${{ env.ALIAS_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Configure kubectl
+        # Conditional secret pick — prod uses KUBECONFIG_PROD, dev uses
+        # KUBECONFIG_DEV. Both must be base64-encoded kubeconfigs.
+        env:
+          KUBECONFIG_B64: ${{ inputs.environment == 'prod' && secrets.KUBECONFIG_PROD || secrets.KUBECONFIG_DEV }}
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "$KUBECONFIG_B64" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          kubectl -n "$NAMESPACE" get deploy qudo-portal-backend -o wide
+
+      - name: Update backend image
+        run: |
+          IMAGE='${{ env.IMAGE_NAME }}:sha-${{ inputs.commit_sha }}'
+          echo "Setting backend image → $IMAGE"
+          kubectl -n "$NAMESPACE" set image deploy/qudo-portal-backend backend="$IMAGE"
+
+      - name: Annotate deployment for audit trail
+        # Captures who/why/what on the Deployment object so it surfaces
+        # in `kubectl describe` and `get deploy -o yaml` later.
+        run: |
+          kubectl -n "$NAMESPACE" annotate --overwrite deploy/qudo-portal-backend \
+            qudo.zenv.ai/version='${{ inputs.version }}' \
+            qudo.zenv.ai/commit-sha='${{ inputs.commit_sha }}' \
+            qudo.zenv.ai/deployed-by='${{ github.actor }}' \
+            qudo.zenv.ai/reason='${{ inputs.reason }}'
+
+      - name: Wait for rollout
+        run: kubectl -n "$NAMESPACE" rollout status deploy/qudo-portal-backend --timeout=300s
+
+      - name: Smoke test
+        # Confirm a JNI-backed API call actually round-trips against the
+        # public URL — not just the in-cluster readiness probe.
+        env:
+          PUBLIC_URL: ${{ env.PUBLIC_URL }}
+        run: |
+          set -e
+          curl -sf "$PUBLIC_URL/actuator/health/liveness" > /dev/null
+          curl -sf "$PUBLIC_URL/api/v1/sandbox/primitives/health" > /dev/null
+          PUB=$(curl -s -X POST "$PUBLIC_URL/api/v1/sandbox/primitives/keygen" \
+                  -H 'Content-Type: application/json' \
+                  -H "Origin: $PUBLIC_URL" \
+                  -d '{"algorithm":"ML-DSA-65"}' | jq -r .publicKey)
+          [ -n "$PUB" ] && [ "$PUB" != "null" ]
+          echo "✓ Smoke test passed against $PUBLIC_URL"
+
+      - name: Summary
+        run: |
+          cat << EOF >> "$GITHUB_STEP_SUMMARY"
+          ## Deploy succeeded → ${{ inputs.environment }}
+
+          | Field | Value |
+          |---|---|
+          | Environment | \`${{ inputs.environment }}\` |
+          | Version | \`${{ inputs.version }}\` |
+          | Commit SHA | \`${{ inputs.commit_sha }}\` |
+          | Namespace | \`${{ env.NAMESPACE }}\` |
+          | Image | \`${{ env.IMAGE_NAME }}:sha-${{ inputs.commit_sha }}\` |
+          | Also tagged | \`:${{ inputs.version }}\`, \`:${{ env.ALIAS_TAG }}\` |
+          | Deployed by | @${{ github.actor }} |
+          | Reason | ${{ inputs.reason }} |
+          | URL | ${{ env.PUBLIC_URL }} |
+
+          Rollback: re-run this workflow with the previous good commit's SHA.
+          EOF

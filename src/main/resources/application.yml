@@ -78,6 +78,14 @@ management:
       probes:
         enabled: true
       show-components: when-authorized
+  health:
+    # Don't let the JavaMail health probe gate the overall /actuator/health
+    # status. SMTP creds are optional (demo notifications are best-effort —
+    # DemoRequestController logs a warn and continues if send fails), so a
+    # missing SMTP password must not make the BE look DOWN to K8s probes
+    # or to upstream load balancers.
+    mail:
+      enabled: false
   metrics:
     tags:
       application: qudo-portal-backend

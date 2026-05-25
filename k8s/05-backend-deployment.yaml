@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qudo-portal-backend
+  namespace: qudo-portal-dev
+  labels:
+    app.kubernetes.io/name: qudo-portal-backend
+    app.kubernetes.io/component: backend
+spec:
+  # SINGLE REPLICA. The BE's rate-limit token buckets (RateLimitFilter)
+  # and the in-memory demo-request list live in the JVM heap — they don't
+  # synchronise across pods. Scaling to >1 replica weakens both. When the
+  # rate limiter moves to Redis (see comment in RateLimitFilter.java),
+  # this can become 2+ with anti-affinity.
+  replicas: 1
+  strategy:
+    # RollingUpdate would briefly run two pods sharing the same PVC
+    # (ReadWriteOnce). Recreate avoids that — accept a brief outage on
+    # deploy in exchange for predictable PVC semantics.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qudo-portal-backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qudo-portal-backend
+        app.kubernetes.io/component: backend
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+        - name: backend
+          image: ghcr.io/zenvinnovations/qudo-portal-backend:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8093
+          envFrom:
+            - configMapRef:
+                name: qudo-portal-backend-config
+            - secretRef:
+                name: qudo-portal-backend-smtp
+          volumeMounts:
+            - name: signing-keys
+              mountPath: /var/lib/qudo/keys
+          # K8s-native probes. /actuator/health/liveness is cheap and never
+          # depends on downstream systems (we disabled the MailHealthIndicator
+          # in application.yml so an SMTP outage can't take the pod down).
+          # /actuator/health/readiness becomes UP after Spring's
+          # ApplicationContext has refreshed — which only happens after the
+          # JNI provider successfully loaded via @PostConstruct.
+          startupProbe:
+            # Cold start: native lib dlopen + OpenSSL provider init +
+            # Spring context refresh + ML-DSA-65 keypair load takes
+            # ~4s on this box. Be generous (up to 60s) so a slow first
+            # boot doesn't trigger a restart loop.
+            httpGet: { path: /actuator/health/liveness, port: 8093 }
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8093 }
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8093 }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: signing-keys
+          persistentVolumeClaim:
+            claimName: qudo-portal-backend-keys

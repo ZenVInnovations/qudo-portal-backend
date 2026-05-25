@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qudo-portal-frontend
+  namespace: qudo-portal-dev
+  labels:
+    app.kubernetes.io/name: qudo-portal-frontend
+    app.kubernetes.io/component: frontend
+spec:
+  # FE is stateless and trivially horizontally-scalable (pure nginx serving
+  # the SPA bundle + reverse-proxying /api,/oauth2,/login to the BE
+  # Service). Start at 1; bump to 2+ when traffic justifies it.
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qudo-portal-frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qudo-portal-frontend
+        app.kubernetes.io/component: frontend
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+        - name: frontend
+          image: ghcr.io/zenvinnovations/qudo-portal-frontend:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+          # nginx starts in <100ms; no startupProbe needed. The probes hit
+          # the SPA index.html — that 200s as soon as nginx is up.
+          livenessProbe:
+            httpGet: { path: /, port: 80 }
+            periodSeconds: 30
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

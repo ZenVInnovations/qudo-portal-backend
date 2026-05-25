@@ -1,0 +1,52 @@
+# Non-secret runtime configuration for the backend. Anything that depends
+# on the cluster/environment (and isn't a credential) belongs here. Secrets
+# live in 03-backend-secret.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qudo-portal-backend-config
+  namespace: qudo-portal-dev
+  labels:
+    app.kubernetes.io/name: qudo-portal-backend
+    app.kubernetes.io/component: backend
+data:
+  # Profile pin — application-prod.yml hardcodes SSRF guard ON, tighter rate
+  # limits, persistent demo-keys dir at /var/lib/qudo/keys, WARN-level
+  # Spring/Tomcat logging.
+  SPRING_PROFILES_ACTIVE: "prod"
+
+  # CORS allow-list. The Spring SecurityConfig allows exactly this origin.
+  # Browser sends Origin: https://dev.qudo.zenv.ai on every API POST; if
+  # this doesn't match, every mutating request gets 403 "Invalid CORS
+  # request" from Spring's CORS filter (before any controller is reached).
+  FRONTEND_ORIGIN: "https://dev.qudo.zenv.ai"
+
+  # Demo-request notification routing. Body comes from the form; recipients
+  # don't. Override DEMO_NOTIFY_TO per-environment.
+  DEMO_NOTIFY_TO: "venkatesh.pulimamidi@zenv.ai"
+  DEMO_NOTIFY_FROM: "noreply@zenv.ai"
+  DEMO_NOTIFY_FROM_NAME: "Qudo PQC (ZenV Quantum)"
+
+  # ML-DSA-65 demo-notification signing key directory. Mounted via PVC at
+  # this exact path (04-backend-pvc.yaml) so the keypair survives pod
+  # restarts and signature verifiers on previously-sent emails stay valid.
+  DEMO_KEYS_DIR: "/var/lib/qudo/keys"
+
+  # SMTP defaults — the password comes from the Secret. Override host/port
+  # here if you use a non-Gmail SMTP relay.
+  SMTP_ADDRESS: "smtp.gmail.com"
+  SMTP_PORT: "587"
+
+  # ----- Optional overrides; uncomment if you want to deviate from the
+  #       application-prod.yml defaults. Listed here so the deploy is
+  #       self-documenting.
+  # APP_SCANNER_ENABLED: "true"
+  # APP_SCANNER_ALLOW_PRIVATE: "false"      # prod: HARD OFF; the BE rejects private IPs at the SSRF guard
+  # APP_SCANNER_MAX_OUTPUT_BYTES: "65536"
+  # APP_RATELIMIT_ENABLED: "true"
+  # APP_RATELIMIT_SANDBOX_RPM: "60"
+  # APP_RATELIMIT_SANDBOX_BURST: "20"
+  # APP_RATELIMIT_SCANNER_RPM: "10"
+  # APP_RATELIMIT_SCANNER_BURST: "5"
+  # APP_RATELIMIT_DEMO_RPM: "5"
+  # APP_RATELIMIT_DEMO_BURST: "3"

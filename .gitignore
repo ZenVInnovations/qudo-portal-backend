@@ -12,3 +12,13 @@ mvnw.cmd
 keys/
 .env
 .env.local
+
+# Linux native crypto libraries — release artifacts of qudo-jni-crypto, committed
+# so CI builds are reproducible without pulling from external infrastructure.
+# Source: scp'd once from /opt/zenv/qudo-pqc-developer-portal/docker/lib/ on the
+# dev VPS. When qudo team cuts a new release, replace these files in-tree and
+# bump the image tag. See README.md → "Updating native libraries".
+# The Dockerfile's `patchelf --clear-execstack` step makes the build self-healing
+# if a future drop ships with the executable-stack flag set.
+# (Uncomment the line below to switch back to fetching them out-of-tree.)
+# docker/native/*.so

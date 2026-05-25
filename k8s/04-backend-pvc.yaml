@@ -1,0 +1,31 @@
+# Small PVC for the ML-DSA-65 demo-notification signing keypair.
+#
+# DemoRequestController.initKeys() (BE) writes:
+#   /var/lib/qudo/keys/portal-signing-mldsa65.priv.pem
+#   /var/lib/qudo/keys/portal-signing-mldsa65.pub.pem
+#
+# Without persistence, every pod restart mints a new keypair and any
+# X-Qudo-Signature header on a previously-sent notification email becomes
+# unverifiable. With this PVC mounted at /var/lib/qudo/keys, the BE logs
+# "Loaded existing keypair" on restart instead of "Generated new ML-DSA-65
+# keypair", and downstream verifiers stay happy.
+#
+# 100Mi is wildly over-spec for a 5KB keypair — local-path StorageClass
+# has no granular allocation cost, so we round up. ReadWriteOnce because
+# the BE runs as a single replica (the in-memory rate-limit buckets and
+# demo-request list make multi-replica unsafe today; if/when we move
+# rate limiting to Redis, revisit this).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: qudo-portal-backend-keys
+  namespace: qudo-portal-dev
+  labels:
+    app.kubernetes.io/name: qudo-portal-backend
+    app.kubernetes.io/component: backend
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 100Mi
