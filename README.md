@@ -77,16 +77,38 @@ mvn package
 java -Djava.library.path=/path/to/qudo/lib -jar target/qudo-portal-backend-1.0.0.jar
 ```
 
-Or via Docker (requires the `qudo-pqc-runtime:latest` base image with the native lib baked in):
+### Via Docker
+
+The Dockerfile is self-contained — it builds OpenSSL 3.5 from source, packages the Spring Boot JAR, and assembles the runtime image in three stages. **No external base image** required.
+
+**One-time prerequisite:** drop the Linux x86_64 native libraries into `libs/native/linux-x86_64/`:
+
+```
+libs/native/linux-x86_64/libqudo_jni_crypto.so
+libs/native/linux-x86_64/qudoprovider.so
+```
+
+See [`libs/native/linux-x86_64/README.md`](libs/native/linux-x86_64/README.md) for where to get them.
+
+**Build + run:**
 
 ```bash
 docker build -t qudo-portal-backend:1.0.0 .
-docker run -p 8093:8093 \
-  -e DB_URL=jdbc:postgresql://db:5432/qudo_portal \
-  -e DB_USERNAME=... -e DB_PASSWORD=... \
+
+docker run -d --name qudo-portal-backend -p 8093:8093 \
+  -e SPRING_PROFILES_ACTIVE=prod \
   -e FRONTEND_ORIGIN=https://qudo.zenv.ai \
+  -e SMTP_USER_NAME=... \
+  -e SMTP_PASSWORD=... \
+  -e DEMO_NOTIFY_TO=ops@zenv.ai \
+  -e JAVA_OPTS="-XX:MaxRAMPercentage=75" \
   qudo-portal-backend:1.0.0
+
+# Health check
+curl http://localhost:8093/actuator/health
 ```
+
+The image runs as the non-root `qudo` user and includes a Docker `HEALTHCHECK` against `/actuator/health`. Tune the JVM at deploy time via `JAVA_OPTS` — no rebuild needed.
 
 ## Enabling Google OAuth2 sign-in
 

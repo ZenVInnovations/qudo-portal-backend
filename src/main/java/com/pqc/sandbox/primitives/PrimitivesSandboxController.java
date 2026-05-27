@@ -32,6 +32,24 @@ public class PrimitivesSandboxController {
 
     public PrimitivesSandboxController(QudoCryptoService qudo) { this.qudo = qudo; }
 
+    /**
+     * Pull a required base64-encoded field out of the request body, returning a
+     * customer-friendly error if it's missing or malformed. Replaces the raw
+     * {@code Base64.getDecoder().decode(req.get("x"))} which NPEs into an ugly
+     * stacktrace message when the field is absent.
+     */
+    private static byte[] requireBase64(Map<String, String> req, String field) {
+        String v = req.get(field);
+        if (v == null || v.isEmpty()) {
+            throw new IllegalArgumentException("'" + field + "' is required.");
+        }
+        try {
+            return Base64.getDecoder().decode(v);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("'" + field + "' must be valid base64.");
+        }
+    }
+
     // ───── Keygen ─────
 
     @PostMapping("/keygen")
@@ -60,8 +78,8 @@ public class PrimitivesSandboxController {
     public ResponseEntity<?> sign(@RequestBody Map<String, String> req) {
         try {
             String algorithm = req.getOrDefault("algorithm", "ML-DSA-65");
-            byte[] data = Base64.getDecoder().decode(req.get("data"));
-            byte[] privateKey = Base64.getDecoder().decode(req.get("privateKey"));
+            byte[] data = requireBase64(req, "data");
+            byte[] privateKey = requireBase64(req, "privateKey");
             long start = System.nanoTime();
             byte[] sig = qudo.sign(data, privateKey, algorithm);
             long elapsed = (System.nanoTime() - start) / 1_000_000;
@@ -80,9 +98,9 @@ public class PrimitivesSandboxController {
     public ResponseEntity<?> verify(@RequestBody Map<String, String> req) {
         try {
             String algorithm = req.getOrDefault("algorithm", "ML-DSA-65");
-            byte[] data = Base64.getDecoder().decode(req.get("data"));
-            byte[] signature = Base64.getDecoder().decode(req.get("signature"));
-            byte[] publicKey = Base64.getDecoder().decode(req.get("publicKey"));
+            byte[] data = requireBase64(req, "data");
+            byte[] signature = requireBase64(req, "signature");
+            byte[] publicKey = requireBase64(req, "publicKey");
             long start = System.nanoTime();
             boolean valid = qudo.verify(data, signature, publicKey, algorithm);
             long elapsed = (System.nanoTime() - start) / 1_000_000;
@@ -102,7 +120,7 @@ public class PrimitivesSandboxController {
     public ResponseEntity<?> kemEncapsulate(@RequestBody Map<String, String> req) {
         try {
             String algorithm = req.getOrDefault("algorithm", "ML-KEM-768");
-            byte[] publicKey = Base64.getDecoder().decode(req.get("publicKey"));
+            byte[] publicKey = requireBase64(req, "publicKey");
             long start = System.nanoTime();
             KemEncapsulation encap = qudo.kemEncapsulate(publicKey, algorithm);
             long elapsed = (System.nanoTime() - start) / 1_000_000;
@@ -124,8 +142,8 @@ public class PrimitivesSandboxController {
     public ResponseEntity<?> kemDecapsulate(@RequestBody Map<String, String> req) {
         try {
             String algorithm = req.getOrDefault("algorithm", "ML-KEM-768");
-            byte[] ciphertext = Base64.getDecoder().decode(req.get("ciphertext"));
-            byte[] privateKey = Base64.getDecoder().decode(req.get("privateKey"));
+            byte[] ciphertext = requireBase64(req, "ciphertext");
+            byte[] privateKey = requireBase64(req, "privateKey");
             long start = System.nanoTime();
             byte[] sharedSecret = qudo.kemDecapsulate(ciphertext, privateKey, algorithm);
             long elapsed = (System.nanoTime() - start) / 1_000_000;
@@ -146,7 +164,7 @@ public class PrimitivesSandboxController {
     public ResponseEntity<?> hash(@RequestBody Map<String, String> req) {
         try {
             String algorithm = req.getOrDefault("algorithm", "SHA-256");
-            byte[] data = Base64.getDecoder().decode(req.get("data"));
+            byte[] data = requireBase64(req, "data");
             long start = System.nanoTime();
             byte[] digest;
             if ("SHA-256".equalsIgnoreCase(algorithm)) {
@@ -172,8 +190,8 @@ public class PrimitivesSandboxController {
     @PostMapping("/aes-gcm-encrypt")
     public ResponseEntity<?> aesEncrypt(@RequestBody Map<String, String> req) {
         try {
-            byte[] plaintext = Base64.getDecoder().decode(req.get("plaintext"));
-            byte[] key = Base64.getDecoder().decode(req.get("key"));
+            byte[] plaintext = requireBase64(req, "plaintext");
+            byte[] key = requireBase64(req, "key");
             if (key.length != 32) {
                 return ResponseEntity.badRequest().body(Map.of(
                         "status", "error",
@@ -201,9 +219,9 @@ public class PrimitivesSandboxController {
     @PostMapping("/aes-gcm-decrypt")
     public ResponseEntity<?> aesDecrypt(@RequestBody Map<String, String> req) {
         try {
-            byte[] ciphertext = Base64.getDecoder().decode(req.get("ciphertext"));
-            byte[] key = Base64.getDecoder().decode(req.get("key"));
-            byte[] iv = Base64.getDecoder().decode(req.get("iv"));
+            byte[] ciphertext = requireBase64(req, "ciphertext");
+            byte[] key = requireBase64(req, "key");
+            byte[] iv = requireBase64(req, "iv");
             Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
             c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, iv));
             long start = System.nanoTime();
@@ -225,7 +243,7 @@ public class PrimitivesSandboxController {
     @PostMapping("/derive-address")
     public ResponseEntity<?> deriveAddress(@RequestBody Map<String, String> req) {
         try {
-            byte[] publicKey = Base64.getDecoder().decode(req.get("publicKey"));
+            byte[] publicKey = requireBase64(req, "publicKey");
             String address = qudo.deriveAddress(publicKey);
             return ResponseEntity.ok(Map.of(
                     "status", "success",
