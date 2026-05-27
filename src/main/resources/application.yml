@@ -68,9 +68,9 @@ demo:
     # (john@zenv.ai + app password) with "Send mail as" verified for
     # noreply on that account, OR via Workspace SMTP relay once that's
     # turned on. From the recipient's perspective the mail always
-    # reads: "Qudo PQC" <noreply@zenv.ai>.
+    # reads: "Qudo PQC (ZenV Quantum)" <noreply@zenv.ai>.
     from: ${DEMO_NOTIFY_FROM:noreply@zenv.ai}
-    fromName: ${DEMO_NOTIFY_FROM_NAME:Qudo PQC}
+    fromName: ${DEMO_NOTIFY_FROM_NAME:Qudo PQC (ZenV Quantum)}
   keys:
     dir: ${DEMO_KEYS_DIR:./keys}
 

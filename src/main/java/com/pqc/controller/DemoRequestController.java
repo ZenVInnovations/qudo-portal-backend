@@ -56,7 +56,7 @@ public class DemoRequestController {
     @Value("${demo.notification.from:noreply@zenv.ai}")
     private String notifyFrom;
 
-    @Value("${demo.notification.fromName:Qudo PQC}")
+    @Value("${demo.notification.fromName:Qudo PQC (ZenV Quantum)}")
     private String notifyFromName;
 
     @Value("${demo.keys.dir:./keys}")
