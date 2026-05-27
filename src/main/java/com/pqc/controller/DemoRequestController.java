@@ -50,13 +50,13 @@ public class DemoRequestController {
         return t;
     });
 
-    @Value("${demo.notification.to:venkatesh.pulimamidi@zenv.ai}")
+    @Value("${demo.notification.to:john@zenv.ai}")
     private String notifyTo;
 
     @Value("${demo.notification.from:noreply@zenv.ai}")
     private String notifyFrom;
 
-    @Value("${demo.notification.fromName:Qudo PQC (ZenV Quantum)}")
+    @Value("${demo.notification.fromName:Qudo PQC}")
     private String notifyFromName;
 
     @Value("${demo.keys.dir:./keys}")
