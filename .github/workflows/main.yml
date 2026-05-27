@@ -1,0 +1,139 @@
+# Main-branch CI/CD — runs only on merge to main.
+#
+# Pipeline:
+#   1. compile        — same compile check as pr.yml (belt-and-suspenders)
+#   2. build-and-push — docker build + push to ghcr.io with :sha-<7> tag
+#   3. deploy-dev     — kubectl set image against qudo-portal-dev namespace
+#
+# An image is always pinned in K8s by its SHA tag. The `main` tag is also
+# pushed for human-readable diffing in the GHCR UI, but manifests must
+# never reference it.
+name: Main → dev
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  compile:
+    name: Compile + package
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { java-version: '17', distribution: 'temurin', cache: 'maven' }
+      - name: Install qudo-jni-crypto into local Maven repo
+        run: |
+          mvn -B -q install:install-file \
+            -Dfile=libs/qudo-jni-crypto-1.0.0.jar \
+            -DpomFile=libs/qudo-jni-crypto-1.0.0.pom \
+            -DgroupId=com.qudo -DartifactId=qudo-jni-crypto \
+            -Dversion=1.0.0 -Dpackaging=jar
+      - name: Compile + package
+        run: mvn -B -q package -DskipTests
+
+  build-and-push:
+    name: Build + push image
+    needs: compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}    # the sha-<7> tag
+      image_ref: ${{ steps.meta.outputs.tags }}       # full image:tag, multi-line
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=short      # → sha-1a2b3c4 (immutable, pinned by manifest)
+            type=ref,event=branch      # → main       (floating, informational only)
+
+      - name: Build + push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Cache the OpenSSL 3.5 compile + Maven layers — full rebuild is
+          # ~6 min, cached rebuild on source-only changes is ~30s.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-dev:
+    name: Deploy to qudo-portal-dev
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # GitHub Environments — gives us a deploy-history page per env and
+    # the option to require manual approval later when prod arrives.
+    environment:
+      name: dev
+      url: https://dev.qudo.zenv.ai
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure kubectl from KUBECONFIG_DEV
+        # KUBECONFIG_DEV is a base64-encoded kubeconfig for the
+        # github-deployer ServiceAccount in qudo-portal-dev. It can ONLY
+        # touch resources in that namespace (Role-bound). See CI-SETUP.md.
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBECONFIG_DEV }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          kubectl version --client=true
+          kubectl -n qudo-portal-dev get deployment qudo-portal-backend -o wide
+
+      - name: Update backend image
+        # Image tag is the sha-<7-char> form (e.g. sha-1a2b3c4). The
+        # docker/metadata-action above emits this as steps.meta.outputs.version.
+        run: |
+          IMAGE='${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image_tag }}'
+          echo "Setting backend image → $IMAGE"
+          kubectl -n qudo-portal-dev set image deploy/qudo-portal-backend backend="$IMAGE"
+
+      - name: Wait for rollout
+        # Fails the job if the new pod doesn't reach Ready within 3 min.
+        # K8s automatically rolls back to the previous ReplicaSet if pods
+        # fail their readiness probe past the timeout — but we still want
+        # the CI run to go RED so someone investigates.
+        run: kubectl -n qudo-portal-dev rollout status deploy/qudo-portal-backend --timeout=180s
+
+      - name: Post-deploy smoke test
+        # Hit the public URL once the rollout reports Ready. Catches the
+        # case where K8s thinks the pod is healthy but something in the
+        # request path is actually broken (JNI symbol missing, CORS,
+        # ingress misroute, etc.).
+        run: |
+          set -e
+          curl -sf https://dev.qudo.zenv.ai/actuator/health/liveness > /dev/null
+          curl -sf https://dev.qudo.zenv.ai/api/v1/sandbox/primitives/health > /dev/null
+          PUB=$(curl -s -X POST https://dev.qudo.zenv.ai/api/v1/sandbox/primitives/keygen \
+                  -H 'Content-Type: application/json' \
+                  -H 'Origin: https://dev.qudo.zenv.ai' \
+                  -d '{"algorithm":"ML-DSA-65"}' | jq -r .publicKey)
+          [ -n "$PUB" ] && [ "$PUB" != "null" ]
+          echo "Smoke test passed."

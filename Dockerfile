@@ -1,158 +1,99 @@
-# syntax=docker/dockerfile:1.7
-#
-# Self-contained, multi-stage build for the Qudo PQC Portal backend.
-# DevOps runs `docker build -t qudo-portal-backend:1.0.0 .` and gets a
-# production-shape image — no external base images, no separate runtime
-# build step, no private registry.
-#
-# Build stages:
-#   1. openssl-build  — compile OpenSSL 3.5 from source (public distros
-#                       still ship 3.0; we need ≥3.4 for the Qudo
-#                       provider + PQC TLS groups in the scanner)
-#   2. jar-build      — Maven + JDK 17, install the bundled qudo-jni-
-#                       crypto artifact, package the Spring Boot fat JAR
-#   3. runtime        — eclipse-temurin JRE + OpenSSL from stage 1 + the
-#                       Qudo native libs + the JAR, running as a non-
-#                       root user with a Spring Actuator HEALTHCHECK.
-#
-# Native libs prerequisite — DevOps must drop the Linux build of the
-# Qudo JNI crypto + provider into:
-#     libs/native/linux-x86_64/libqudo_jni_crypto.so
-#     libs/native/linux-x86_64/qudoprovider.so
-# (Build them once from the qudo-jni-crypto repo; see its README. The
-# macOS .dylib in this repo's libs/ is for local dev only.)
+# =============================================================================
+# Qudo Portal Backend — self-contained image for Docker / Kubernetes
+# -----------------------------------------------------------------------------
+# Three stages:
+#   1. openssl-build  — compile OpenSSL 3.5 from source (Ubuntu's 3.0 is too
+#                       old for qudoprovider.so, which needs OpenSSL >= 3.3).
+#                       Slow first build (~5 min); cached afterwards.
+#   2. maven-build    — install qudo-jni-crypto into local Maven repo,
+#                       build the Spring Boot fat jar.
+#   3. runtime        — JRE 17 + OpenSSL 3.5 + native .so files + jar,
+#                       all baked in. No external base image, no volume
+#                       mounts required at runtime.
+# =============================================================================
 
-# ─────────────────────────────────────────────────────────────────────
-# Stage 1 — Build OpenSSL 3.5 from source.
-#
-# Base image matches the runtime base (eclipse-temurin:17-jre-jammy is
-# Ubuntu 22.04) so glibc + libssl symbol versions line up. If the build
-# base is newer than the runtime base, the resulting openssl binary
-# falls back to the runtime's system libssl/libcrypto and gets
-# "version `OPENSSL_3.x.0' not found" at startup.
-#
-# `-Wl,-rpath,/opt/openssl/lib64` bakes an RPATH into every binary so
-# they self-reference the bundled libs regardless of LD_LIBRARY_PATH.
-# Belt-and-braces against accidental LD_LIBRARY_PATH unset.
-#
-# Cached aggressively: as long as OPENSSL_VERSION doesn't change,
-# subsequent `docker build` invocations skip this entire stage.
-# ─────────────────────────────────────────────────────────────────────
-FROM ubuntu:22.04 AS openssl-build
+# ----- Stage 1: OpenSSL 3.5 builder ------------------------------------------
+FROM eclipse-temurin:17-jre AS openssl-build
 
 ARG OPENSSL_VERSION=3.5.0
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-      build-essential \
-      wget \
-      perl \
-      ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        wget build-essential ca-certificates perl \
+    && cd /tmp \
+    && wget -q https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz \
+    && tar -xzf openssl-${OPENSSL_VERSION}.tar.gz \
+    && cd openssl-${OPENSSL_VERSION} \
+    && ./Configure --prefix=/usr/local/openssl --openssldir=/usr/local/openssl/ssl \
+       shared no-tests \
+    && make -j"$(nproc)" -s \
+    && make install_sw install_ssldirs -s \
+    && rm -rf /tmp/openssl*
 
-WORKDIR /tmp
-RUN wget -q "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz" && \
-    tar xzf "openssl-${OPENSSL_VERSION}.tar.gz" && \
-    cd "openssl-${OPENSSL_VERSION}" && \
-    ./config --prefix=/opt/openssl --openssldir=/opt/openssl/ssl \
-        -Wl,-rpath,/opt/openssl/lib64 \
-        shared no-tests no-docs && \
-    make -j"$(nproc)" && \
-    make install_sw && \
-    rm -rf /tmp/openssl-*
+# ----- Stage 2: Maven builder ------------------------------------------------
+FROM maven:3.9-eclipse-temurin-17 AS maven-build
+WORKDIR /build
 
-# ─────────────────────────────────────────────────────────────────────
-# Stage 2 — Build the Spring Boot fat JAR.
-# ─────────────────────────────────────────────────────────────────────
-FROM maven:3.9-eclipse-temurin-17 AS jar-build
-
-WORKDIR /app
-
-# The Qudo JNI crypto artifact isn't on Maven Central; install the
-# bundled copy into this stage's local repo so the pom's
-# <dependency>com.qudo:qudo-jni-crypto:1.0.0</dependency> resolves.
+# Install the qudo-jni-crypto jar into the local Maven repo so pom.xml's
+# <dependency> resolves. Same one-time install that the README documents.
 COPY libs/qudo-jni-crypto-1.0.0.jar /tmp/qudo-jni.jar
 COPY libs/qudo-jni-crypto-1.0.0.pom /tmp/qudo-jni.pom
-RUN mvn install:install-file \
-      -Dfile=/tmp/qudo-jni.jar \
-      -DpomFile=/tmp/qudo-jni.pom \
-      -DgroupId=com.qudo \
-      -DartifactId=qudo-jni-crypto \
-      -Dversion=1.0.0 \
-      -Dpackaging=jar \
-      -q
+RUN mvn install:install-file -Dfile=/tmp/qudo-jni.jar -DpomFile=/tmp/qudo-jni.pom \
+        -DgroupId=com.qudo -DartifactId=qudo-jni-crypto -Dversion=1.0.0 -Dpackaging=jar -q
 
-# Copy pom + go-offline first so the dep layer caches between builds.
+# Pre-fetch deps so source-only changes don't re-download the world.
 COPY pom.xml .
-RUN mvn dependency:go-offline -B 2>/dev/null || true
+RUN mvn -B -q dependency:go-offline || true
 
 COPY src ./src
-RUN mvn package -DskipTests -B
+RUN mvn -B -q package -DskipTests
 
-# ─────────────────────────────────────────────────────────────────────
-# Stage 3 — Runtime image.
-# JRE 17 + OpenSSL 3.5 + Qudo native libs + the built JAR.
-# ─────────────────────────────────────────────────────────────────────
-FROM eclipse-temurin:17-jre-jammy AS runtime
+# ----- Stage 3: Runtime ------------------------------------------------------
+FROM eclipse-temurin:17-jre
 
-LABEL org.opencontainers.image.title="Qudo PQC Portal Backend" \
-      org.opencontainers.image.description="Spring Boot backend for the Qudo PQC Developer Portal" \
-      org.opencontainers.image.vendor="ZenV Quantum" \
-      org.opencontainers.image.source="https://github.com/ZenVInnovations/qudo-portal-backend"
+# curl   — for `kubectl exec` debugging and any healthchecks
+# patchelf — clear the executable-stack flag on libqudo-pqc.so (released
+#            without -Wl,-z,noexecstack; newer glibc refuses to dlopen
+#            libraries that request +X stack)
+RUN apt-get update && apt-get install -y --no-install-recommends curl patchelf \
+    && rm -rf /var/lib/apt/lists/*
 
-# curl is used by the HEALTHCHECK; ca-certificates are needed for any
-# outbound HTTPS (e.g. the scanner probing external endpoints).
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-      curl \
-      ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+# OpenSSL 3.5 from stage 1.
+COPY --from=openssl-build /usr/local/openssl /usr/local/openssl
 
-# OpenSSL 3.5 from stage 1 — replaces the system openssl on PATH.
-# LD_LIBRARY_PATH covers both `lib` and `lib64` because OpenSSL's
-# installer puts shared libs in `lib` on Ubuntu (Debian convention)
-# but `lib64` on RHEL-family distros. Listing both is harmless and
-# avoids surprises if the build base ever changes.
-COPY --from=openssl-build /opt/openssl /opt/openssl
-ENV PATH=/opt/openssl/bin:$PATH \
-    LD_LIBRARY_PATH=/opt/openssl/lib:/opt/openssl/lib64
+# Link the isolated OpenSSL's CA dir to the system CA bundle so TLS
+# verification works for outbound calls (SMTP STARTTLS, scanner).
+RUN mkdir -p /usr/local/openssl/ssl/certs \
+    && ln -sf /etc/ssl/certs/ca-certificates.crt /usr/local/openssl/ssl/cert.pem
 
-# Qudo native artifacts.
-#   - libqudo_jni_crypto.so  → loaded by Spring Boot via -Djava.library.path
-#   - qudoprovider.so        → loaded by OpenSSL as a provider plugin
-# Provider lands in /opt/openssl/lib/ossl-modules/ alongside engines-3
-# (the path OpenSSL's loader actually scans on Ubuntu).
-# These must be Linux x86_64 builds; see the native libs prerequisite
-# note at the top of this Dockerfile.
-COPY libs/native/linux-x86_64/libqudo_jni_crypto.so /app/lib/
-COPY libs/native/linux-x86_64/qudoprovider.so /opt/openssl/lib/ossl-modules/
-
-# Non-root user — the JVM never needs root, and dropping privileges
-# limits the blast radius of any RCE in the app or a dependency.
-RUN useradd --system --uid 1000 --create-home --home-dir /home/qudo qudo && \
-    mkdir -p /var/lib/qudo /app && \
-    chown -R qudo:qudo /var/lib/qudo /app /home/qudo
-
+# Three Linux native libs that the JNI provider needs:
+#   libqudo_jni_crypto.so  — System.loadLibrary("qudo_jni_crypto") target
+#   libqudo-pqc.so         — crypto module the JNI links against
+#   qudoprovider.so        — OpenSSL 3 provider plugin (PQC algorithms)
 WORKDIR /app
-COPY --from=jar-build --chown=qudo:qudo /app/target/*.jar app.jar
+RUN mkdir -p /app/lib /app/keys
+COPY docker/native/libqudo_jni_crypto.so /app/lib/
+COPY docker/native/libqudo-pqc.so        /app/lib/
+COPY docker/native/qudoprovider.so       /app/lib/
 
-USER qudo
+# Defensive: ensure none of the .so files request an executable stack.
+# Idempotent — no-op when the flag is already clear.
+RUN patchelf --clear-execstack /app/lib/libqudo_jni_crypto.so \
+                                /app/lib/libqudo-pqc.so \
+                                /app/lib/qudoprovider.so
 
-# Spring Boot prod profile listens on 8093 (see application-prod.yml).
+# The dynamic linker needs OpenSSL 3.5's libcrypto.so.3 first, then the
+# JNI libs. OPENSSL_MODULES tells OpenSSL where to look for provider
+# plugins (qudoprovider.so).
+ENV LD_LIBRARY_PATH=/usr/local/openssl/lib64:/app/lib \
+    OPENSSL_MODULES=/app/lib \
+    PATH=/usr/local/openssl/bin:$PATH \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_DIR=/etc/ssl/certs
+
+COPY --from=maven-build /build/target/qudo-portal-backend-*.jar /app/app.jar
+
 EXPOSE 8093
 
-# Spring Actuator /health is exposed unauthenticated on the prod
-# profile. start-period gives the JVM time to warm up + load the JNI
-# library before health is first probed.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -fsS http://localhost:8093/actuator/health || exit 1
-
-# Default to the prod profile so the container behaves like production
-# out of the box. Override at runtime with `-e SPRING_PROFILES_ACTIVE=dev`.
-ENV SPRING_PROFILES_ACTIVE=prod \
-    JAVA_OPTS=""
-
-# JAVA_OPTS is passed through so DevOps can tune heap / GC / debug flags
-# at deploy time without rebuilding the image:
-#   docker run -e JAVA_OPTS="-Xmx512m -XX:MaxRAMPercentage=75" ...
-ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -Djava.library.path=/app/lib -jar app.jar"]
+# -Djava.library.path so System.loadLibrary("qudo_jni_crypto") resolves
+# without falling back to the JAR-bundled .dylib (macOS-only) extract path.
+ENTRYPOINT ["java", "-Djava.library.path=/app/lib", "-jar", "/app/app.jar"]
