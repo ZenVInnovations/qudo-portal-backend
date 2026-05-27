@@ -59,7 +59,16 @@ app:
 
 demo:
   notification:
-    to: ${DEMO_NOTIFY_TO:venkatesh.pulimamidi@zenv.ai}
+    # Where the demo-request notifications land. john@zenv.ai is the
+    # support inbox; override via DEMO_NOTIFY_TO at deploy time if a
+    # different person owns the funnel.
+    to: ${DEMO_NOTIFY_TO:john@zenv.ai}
+    # Outbound sender identity. noreply@zenv.ai is a Workspace alias /
+    # group; the actual SMTP auth happens via spring.mail.username
+    # (john@zenv.ai + app password) with "Send mail as" verified for
+    # noreply on that account, OR via Workspace SMTP relay once that's
+    # turned on. From the recipient's perspective the mail always
+    # reads: "Qudo PQC (ZenV Quantum)" <noreply@zenv.ai>.
     from: ${DEMO_NOTIFY_FROM:noreply@zenv.ai}
     fromName: ${DEMO_NOTIFY_FROM_NAME:Qudo PQC (ZenV Quantum)}
   keys:
