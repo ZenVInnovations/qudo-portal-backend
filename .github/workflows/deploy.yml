@@ -61,7 +61,7 @@ env:
 jobs:
   deploy:
     name: ${{ inputs.environment }} ← ${{ inputs.version }} (${{ inputs.commit_sha }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, vps]
     timeout-minutes: 15
     environment:
       # GH Environment selection — prod maps to "production" (with required

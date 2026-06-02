@@ -86,7 +86,7 @@ jobs:
   deploy-dev:
     name: Deploy to qudo-portal-dev
     needs: build-and-push
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, vps]
     timeout-minutes: 5
     # GitHub Environments — gives us a deploy-history page per env and
     # the option to require manual approval later when prod arrives.
