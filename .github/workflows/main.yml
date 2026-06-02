@@ -47,10 +47,18 @@ jobs:
       contents: read
       packages: write
     outputs:
-      image_tag: ${{ steps.meta.outputs.version }}    # the sha-<7> tag
-      image_ref: ${{ steps.meta.outputs.tags }}       # full image:tag, multi-line
+      image_name: ${{ steps.vars.outputs.image_name }}
+      sha_tag:    ${{ steps.vars.outputs.sha_tag }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve lowercase image name + short SHA tag
+        id: vars
+        run: |
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          SHA_TAG="sha-$(echo "${{ github.sha }}" | cut -c1-7)"
+          echo "image_name=ghcr.io/${REPO_LC}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=$SHA_TAG"              >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -62,22 +70,14 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,format=short      # → sha-1a2b3c4 (immutable, pinned by manifest)
-            type=ref,event=branch      # → main       (floating, informational only)
-
       - name: Build + push
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ steps.vars.outputs.image_name }}:${{ steps.vars.outputs.sha_tag }}
+            ${{ steps.vars.outputs.image_name }}:main
           # Cache the OpenSSL 3.5 compile + Maven layers — full rebuild is
           # ~6 min, cached rebuild on source-only changes is ~30s.
           cache-from: type=gha
@@ -96,6 +96,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.33.5
+
       - name: Configure kubectl from KUBECONFIG_DEV
         # KUBECONFIG_DEV is a base64-encoded kubeconfig for the
         # github-deployer ServiceAccount in qudo-portal-dev. It can ONLY
@@ -108,10 +113,8 @@ jobs:
           kubectl -n qudo-portal-dev get deployment qudo-portal-backend -o wide
 
       - name: Update backend image
-        # Image tag is the sha-<7-char> form (e.g. sha-1a2b3c4). The
-        # docker/metadata-action above emits this as steps.meta.outputs.version.
         run: |
-          IMAGE='${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image_tag }}'
+          IMAGE='${{ needs.build-and-push.outputs.image_name }}:${{ needs.build-and-push.outputs.sha_tag }}'
           echo "Setting backend image → $IMAGE"
           kubectl -n qudo-portal-dev set image deploy/qudo-portal-backend backend="$IMAGE"
 
@@ -123,15 +126,14 @@ jobs:
         run: kubectl -n qudo-portal-dev rollout status deploy/qudo-portal-backend --timeout=180s
 
       - name: Post-deploy smoke test
-        # Hit the public URL once the rollout reports Ready. Catches the
-        # case where K8s thinks the pod is healthy but something in the
-        # request path is actually broken (JNI symbol missing, CORS,
-        # ingress misroute, etc.).
+        # --retry tolerates the 1-5s ingress propagation window after
+        # rollout success (ingress-nginx reconfig + endpoint update).
         run: |
           set -e
-          curl -sf https://dev.qudo.zenv.ai/actuator/health/liveness > /dev/null
-          curl -sf https://dev.qudo.zenv.ai/api/v1/sandbox/primitives/health > /dev/null
-          PUB=$(curl -s -X POST https://dev.qudo.zenv.ai/api/v1/sandbox/primitives/keygen \
+          curl -sSf --retry 8 --retry-delay 3 --retry-all-errors \
+            https://dev.qudo.zenv.ai/api/v1/sandbox/primitives/health > /dev/null
+          PUB=$(curl -s --retry 8 --retry-delay 3 --retry-all-errors \
+                  -X POST https://dev.qudo.zenv.ai/api/v1/sandbox/primitives/keygen \
                   -H 'Content-Type: application/json' \
                   -H 'Origin: https://dev.qudo.zenv.ai' \
                   -d '{"algorithm":"ML-DSA-65"}' | jq -r .publicKey)
