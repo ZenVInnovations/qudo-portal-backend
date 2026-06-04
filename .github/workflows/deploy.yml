@@ -42,8 +42,8 @@ on:
           - dev
           - prod
       commit_sha:
-        description: 'Short commit SHA (7 lowercase hex chars)'
-        required: true
+        description: 'Commit SHA — short or full. Leave BLANK to deploy latest main HEAD.'
+        required: false
         type: string
       version:
         description: 'Version label (e.g. v1.0.1 or rollback-2026-05-25)'
@@ -60,8 +60,8 @@ env:
 
 jobs:
   deploy:
-    name: ${{ inputs.environment }} ← ${{ inputs.version }} (${{ inputs.commit_sha }})
-    runs-on: ubuntu-latest
+    name: ${{ inputs.environment }} ← ${{ inputs.version }}
+    runs-on: [self-hosted, vps]
     timeout-minutes: 15
     environment:
       # GH Environment selection — prod maps to "production" (with required
@@ -78,20 +78,34 @@ jobs:
       # Floating alias: :prod for prod, :dev for dev.
       ALIAS_TAG: ${{ inputs.environment }}
     steps:
-      - name: Validate commit SHA format
+      - name: Resolve commit SHA + lowercase image name
+        id: vars
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_SHA: ${{ inputs.commit_sha }}
         run: |
-          if ! [[ '${{ inputs.commit_sha }}' =~ ^[0-9a-f]{7}$ ]]; then
-            echo "::error::commit_sha must be exactly 7 lowercase hex chars (the short SHA used in image tags). Got: ${{ inputs.commit_sha }}"
+          set -euo pipefail
+          if [ -z "$INPUT_SHA" ]; then
+            REF=main
+          else
+            if ! [[ "$INPUT_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
+              echo "::error::commit_sha must be 7-40 lowercase hex chars (or blank for main HEAD). Got: $INPUT_SHA"
+              exit 1
+            fi
+            REF="$INPUT_SHA"
+          fi
+          FULL=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/$REF" | jq -r .sha)
+          if [ -z "$FULL" ] || [ "$FULL" = "null" ]; then
+            echo "::error::Commit '$REF' not found in this repo."
             exit 1
           fi
-
-      - name: Checkout the exact commit being deployed
-        # Needed by PATH B (build) below. PATH A (retag) doesn't need the
-        # source, but checkout is cheap and unconditional.
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.commit_sha }}
-          fetch-depth: 1
+          SHORT="${FULL:0:7}"
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "full_sha=$FULL"                >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT"              >> "$GITHUB_OUTPUT"
+          echo "image_name=ghcr.io/${REPO_LC}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Deploying ${REF} -> ${FULL} (${SHORT})"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -108,7 +122,7 @@ jobs:
         # continue-on-error lets the next two steps branch on outcome.
         continue-on-error: true
         run: |
-          IMAGE='${{ env.IMAGE_NAME }}:sha-${{ inputs.commit_sha }}'
+          IMAGE='${{ steps.vars.outputs.image_name }}:sha-${{ steps.vars.outputs.short_sha }}'
           echo "Probing $IMAGE..."
           docker buildx imagetools inspect "$IMAGE" > /dev/null
 
@@ -118,10 +132,17 @@ jobs:
         # Server-side manifest write via the OCI distribution API.
         if: steps.image_check.outcome == 'success'
         run: |
-          SRC='${{ env.IMAGE_NAME }}:sha-${{ inputs.commit_sha }}'
+          SRC='${{ steps.vars.outputs.image_name }}:sha-${{ steps.vars.outputs.short_sha }}'
           echo "Image already in GHCR — adding tags :${{ inputs.version }} and :${{ env.ALIAS_TAG }}"
-          docker buildx imagetools create --tag '${{ env.IMAGE_NAME }}:${{ inputs.version }}'    "$SRC"
-          docker buildx imagetools create --tag '${{ env.IMAGE_NAME }}:${{ env.ALIAS_TAG }}'      "$SRC"
+          docker buildx imagetools create --tag '${{ steps.vars.outputs.image_name }}:${{ inputs.version }}'    "$SRC"
+          docker buildx imagetools create --tag '${{ steps.vars.outputs.image_name }}:${{ env.ALIAS_TAG }}'      "$SRC"
+
+      - name: Checkout source (PATH B only, image was missing)
+        if: steps.image_check.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.vars.outputs.full_sha }}
+          fetch-depth: 1
 
       - name: PATH B — build + push all three tags (image was missing)
         # Fallback when main.yml never built the commit. Builds from the
@@ -132,11 +153,16 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.IMAGE_NAME }}:sha-${{ inputs.commit_sha }}
-            ${{ env.IMAGE_NAME }}:${{ inputs.version }}
-            ${{ env.IMAGE_NAME }}:${{ env.ALIAS_TAG }}
+            ${{ steps.vars.outputs.image_name }}:sha-${{ steps.vars.outputs.short_sha }}
+            ${{ steps.vars.outputs.image_name }}:${{ inputs.version }}
+            ${{ steps.vars.outputs.image_name }}:${{ env.ALIAS_TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.33.5
 
       - name: Configure kubectl
         # Conditional secret pick — prod uses KUBECONFIG_PROD, dev uses
@@ -151,7 +177,7 @@ jobs:
 
       - name: Update backend image
         run: |
-          IMAGE='${{ env.IMAGE_NAME }}:sha-${{ inputs.commit_sha }}'
+          IMAGE='${{ steps.vars.outputs.image_name }}:sha-${{ steps.vars.outputs.short_sha }}'
           echo "Setting backend image → $IMAGE"
           kubectl -n "$NAMESPACE" set image deploy/qudo-portal-backend backend="$IMAGE"
 
@@ -161,7 +187,7 @@ jobs:
         run: |
           kubectl -n "$NAMESPACE" annotate --overwrite deploy/qudo-portal-backend \
             qudo.zenv.ai/version='${{ inputs.version }}' \
-            qudo.zenv.ai/commit-sha='${{ inputs.commit_sha }}' \
+            qudo.zenv.ai/commit-sha='${{ steps.vars.outputs.short_sha }}' \
             qudo.zenv.ai/deployed-by='${{ github.actor }}' \
             qudo.zenv.ai/reason='${{ inputs.reason }}'
 
@@ -169,15 +195,16 @@ jobs:
         run: kubectl -n "$NAMESPACE" rollout status deploy/qudo-portal-backend --timeout=300s
 
       - name: Smoke test
-        # Confirm a JNI-backed API call actually round-trips against the
-        # public URL — not just the in-cluster readiness probe.
+        # --retry tolerates the 1-5s ingress propagation window after
+        # rollout success (ingress-nginx reconfig + endpoint update).
         env:
           PUBLIC_URL: ${{ env.PUBLIC_URL }}
         run: |
           set -e
-          curl -sf "$PUBLIC_URL/actuator/health/liveness" > /dev/null
-          curl -sf "$PUBLIC_URL/api/v1/sandbox/primitives/health" > /dev/null
-          PUB=$(curl -s -X POST "$PUBLIC_URL/api/v1/sandbox/primitives/keygen" \
+          curl -sSf --retry 8 --retry-delay 3 --retry-all-errors \
+            "$PUBLIC_URL/api/v1/sandbox/primitives/health" > /dev/null
+          PUB=$(curl -s --retry 8 --retry-delay 3 --retry-all-errors \
+                  -X POST "$PUBLIC_URL/api/v1/sandbox/primitives/keygen" \
                   -H 'Content-Type: application/json' \
                   -H "Origin: $PUBLIC_URL" \
                   -d '{"algorithm":"ML-DSA-65"}' | jq -r .publicKey)
@@ -193,9 +220,9 @@ jobs:
           |---|---|
           | Environment | \`${{ inputs.environment }}\` |
           | Version | \`${{ inputs.version }}\` |
-          | Commit SHA | \`${{ inputs.commit_sha }}\` |
+          | Commit SHA | \`${{ steps.vars.outputs.short_sha }}\` |
           | Namespace | \`${{ env.NAMESPACE }}\` |
-          | Image | \`${{ env.IMAGE_NAME }}:sha-${{ inputs.commit_sha }}\` |
+          | Image | \`${{ steps.vars.outputs.image_name }}:sha-${{ steps.vars.outputs.short_sha }}\` |
           | Also tagged | \`:${{ inputs.version }}\`, \`:${{ env.ALIAS_TAG }}\` |
           | Deployed by | @${{ github.actor }} |
           | Reason | ${{ inputs.reason }} |
