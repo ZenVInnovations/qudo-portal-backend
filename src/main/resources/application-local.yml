@@ -8,6 +8,14 @@
 # application-prod.yml for those.
 
 app:
+  admin:
+    # DEV-ONLY default admin so `mvn spring-boot:run` works locally with no
+    # extra setup. Username `admin`, password `admin` (BCrypt hash below). This
+    # profile is NEVER used in a deployment — the Docker image defaults to
+    # `prod`, which fails closed unless ADMIN_USERNAME / ADMIN_PASSWORD_HASH are
+    # provided via env. Override here too if you like.
+    username: ${ADMIN_USERNAME:admin}
+    password-hash: '${ADMIN_PASSWORD_HASH:$2a$10$16FDHZRBzlf3OwdrcrduJuCnapAryHue9SbpZqNYjKq8zviy.B.a.}'
   scanner:
     # Local dev frequently scans 127.0.0.1 / localhost / 192.168.x.y
     # endpoints (a dev server on the same machine or LAN), so the SSRF

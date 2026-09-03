@@ -5,6 +5,27 @@ spring:
   application:
     name: qudo-portal-backend
 
+  # Persistence for the product catalog + audit trail. Postgres is required
+  # (start it with `docker compose up -d`). Secrets/host come from env; the
+  # localhost defaults match docker-compose.yml.
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/qudo_portal}
+    username: ${DB_USERNAME:qudo}
+    password: ${DB_PASSWORD:qudo_local_dev}
+  jpa:
+    hibernate:
+      # Schema is owned by Flyway; Hibernate only validates the mapping.
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
   mail:
     host: ${SMTP_ADDRESS:smtp.gmail.com}
     port: ${SMTP_PORT:587}
@@ -19,8 +40,15 @@ spring:
 
 app:
   frontend:
-    # Origin of the React app — used for CORS allow-list and the OAuth2 success redirect.
+    # Origin of the React app — used for the CORS allow-list.
     origin: ${FRONTEND_ORIGIN:http://localhost:5173}
+  admin:
+    # Single administrator credential for the product-management API
+    # (/api/v1/admin/**). Supplied via env — NEVER committed. The password is a
+    # BCrypt hash, not plaintext. dev/prod FAIL CLOSED at startup if unset; the
+    # `local` profile ships a clearly-flagged dev-only default.
+    username: ${ADMIN_USERNAME:}
+    password-hash: ${ADMIN_PASSWORD_HASH:}
   ratelimit:
     # Per-IP token-bucket rate limits for the abusable public endpoints.
     # Replaces the original plan to gate the sandbox behind Google sign-in:

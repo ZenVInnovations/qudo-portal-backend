@@ -3,6 +3,12 @@
 app:
   scanner:
     enabled: false   # tests don't probe external hosts
+  admin:
+    # Test-only admin credential so SecurityConfig can build its user-details
+    # service in web-slice tests. password-hash below is BCrypt of the string
+    # `qudo-admin-dev` — used by AdminAuthControllerTest to exercise login.
+    username: test-admin
+    password-hash: '$2y$10$GyhATTTqhG2gaunVMRuOke2U0LOvzymxNZC9eTCdO2puqtPh1.bjK'
 
 logging:
   level:
