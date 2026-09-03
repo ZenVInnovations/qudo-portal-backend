@@ -1,9 +1,11 @@
 package com.pqc;
 
 import com.pqc.common.QudoCryptoService;
+import com.pqc.support.TestcontainersConfiguration;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.context.ActiveProfiles;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -17,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * in pom.xml) so the native lib is discoverable.</p>
  */
 @SpringBootTest
+@Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")
 class JniReachabilityTest {
 

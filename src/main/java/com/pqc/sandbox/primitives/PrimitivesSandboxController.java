@@ -50,6 +50,26 @@ public class PrimitivesSandboxController {
         }
     }
 
+    /**
+     * Which implementation served this algorithm — customer-facing provenance,
+     * stamped on every PQC response. PQC algorithms resolve to the configured
+     * provider (qudoprovider = the Qudo PQC Provider backed by libqudo-pqc);
+     * classical algorithms always come from OpenSSL's default provider, because
+     * qudo-pqc-lib supplies PQC math only. Mirrors health() — never claim the
+     * Qudo provider when it isn't the one loaded.
+     */
+    private static String executedBy(String algorithm) {
+        String a = algorithm == null ? "" : algorithm.toUpperCase();
+        boolean pqc = a.startsWith("ML-DSA") || a.startsWith("ML-KEM")
+                || a.startsWith("MLDSA") || a.startsWith("MLKEM")
+                || a.startsWith("SLH-DSA") || a.startsWith("X25519MLKEM") || a.startsWith("X448MLKEM");
+        if (!pqc) return "OpenSSL default provider";
+        String providerName = System.getProperty("qudo.provider.name", "qudoprovider");
+        return "qudoprovider".equals(providerName)
+                ? "Qudo PQC Provider (libqudo-pqc)"
+                : "OpenSSL '" + providerName + "' provider";
+    }
+
     // ───── Keygen ─────
 
     @PostMapping("/keygen")
@@ -66,6 +86,7 @@ public class PrimitivesSandboxController {
                     "privateKey", keys.privateKeyBase64(),
                     "publicKeyBytes", keys.publicKeyPem().length,
                     "privateKeyBytes", keys.privateKeyPem().length,
+                    "executedBy", executedBy(algorithm),
                     "latencyMs", elapsed));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("status", "error", "message", e.getMessage()));
@@ -88,6 +109,7 @@ public class PrimitivesSandboxController {
                     "algorithm", algorithm,
                     "signature", Base64.getEncoder().encodeToString(sig),
                     "signatureBytes", sig.length,
+                    "executedBy", executedBy(algorithm),
                     "latencyMs", elapsed));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("status", "error", "message", e.getMessage()));
@@ -108,6 +130,7 @@ public class PrimitivesSandboxController {
                     "status", "success",
                     "valid", valid,
                     "algorithm", algorithm,
+                    "executedBy", executedBy(algorithm),
                     "latencyMs", elapsed));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("status", "error", "message", e.getMessage()));
@@ -131,6 +154,7 @@ public class PrimitivesSandboxController {
                     "sharedSecret", Base64.getEncoder().encodeToString(encap.sharedSecret()),
                     "ciphertextBytes", encap.ciphertext().length,
                     "sharedSecretBytes", encap.sharedSecret().length,
+                    "executedBy", executedBy(algorithm),
                     "latencyMs", elapsed,
                     "note", "In production the sender keeps the shared secret + sends only the ciphertext over the wire. The recipient decapsulates with their private key to derive the same shared secret."));
         } catch (Exception e) {
@@ -152,6 +176,7 @@ public class PrimitivesSandboxController {
                     "algorithm", algorithm,
                     "sharedSecret", Base64.getEncoder().encodeToString(sharedSecret),
                     "sharedSecretBytes", sharedSecret.length,
+                    "executedBy", executedBy(algorithm),
                     "latencyMs", elapsed));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("status", "error", "message", e.getMessage()));
@@ -277,9 +302,17 @@ public class PrimitivesSandboxController {
 
     @GetMapping("/health")
     public ResponseEntity<?> health() {
+        // Report the OpenSSL provider actually serving the primitives — the
+        // JNI bridge loads whatever -Dqudo.provider.name selects (stock
+        // OpenSSL's "default" works: 3.5+ ships ML-KEM/ML-DSA/SLH-DSA
+        // natively). Never claim the Qudo provider when it isn't loaded.
+        String providerName = System.getProperty("qudo.provider.name", "qudoprovider");
+        String label = "qudoprovider".equals(providerName)
+                ? "Qudo FIPS Provider (JNI)"
+                : "OpenSSL '" + providerName + "' provider (JNI)";
         return ResponseEntity.ok(Map.of(
                 "status", "UP",
                 "service", "primitives-sandbox",
-                "provider", "Qudo FIPS Provider (JNI)"));
+                "provider", label));
     }
 }

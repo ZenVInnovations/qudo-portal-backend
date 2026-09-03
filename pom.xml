@@ -29,9 +29,9 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
-        <!-- Spring Security + OAuth2 client. The OAuth2 flow is only activated
-             when app.auth.enabled=true (see SecurityConfig); without it the
-             default SecurityFilterChain permits all routes. -->
+        <!-- Spring Security. Two filter chains (see SecurityConfig): public
+             routes stay permit-all; /api/v1/admin/** requires an authenticated
+             ROLE_ADMIN session (single admin credential supplied via env). -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-security</artifactId>
@@ -54,9 +54,23 @@
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
-        <!-- Persistence: Postgres + JPA + Flyway. Stores users (and audit /
-             demo-request rows later). H2 fallback profile available for dev
-             smoke tests but Postgres is the production target. -->
+        <!-- Persistence: Postgres + JPA + Flyway. Backing store for the product
+             catalog + audit trail — the backend is the source of truth for which
+             products are publicly visible. Versions managed by the Boot BOM. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+
         <!-- Qudo JNI crypto provider (FIPS 203/204/205 algorithms via OpenSSL).
              Installed locally from libs/ before build — see README for the
              one-time mvn install:install-file command. -->
@@ -89,6 +103,31 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Spring Security test support: @WithMockUser + csrf() postprocessor
+             for the admin authorization slice tests. -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Testcontainers: a real Postgres for the @DataJpaTest product-catalog
+             + Flyway-migration slice tests, which do NOT boot QudoCryptoService
+             and so run without the native crypto lib. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -100,6 +139,11 @@
                     <!-- Native Qudo JNI lib must be on java.library.path; the
                          packaged JAR run separately needs the same flag. -->
                     <jvmArguments>-Djava.library.path=${qudo.native.lib.path}</jvmArguments>
+                    <!-- Pin the real entry point: the throwaway
+                         com.pqc.verify.VerifyApp scaffold also has a main(),
+                         and with two candidates spring-boot:run (and
+                         repackage) refuse to guess. -->
+                    <mainClass>com.pqc.PortalApplication</mainClass>
                 </configuration>
             </plugin>
             <!-- Surefire (unit tests) and Failsafe (integration tests) need
